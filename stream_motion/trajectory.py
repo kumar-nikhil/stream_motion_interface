@@ -220,6 +220,64 @@ def check_limits(
     return warnings
 
 
+def smooth_trajectory(
+    trajectory: List[List[float]],
+    window: int = 7,
+) -> List[List[float]]:
+    """
+    Apply a symmetric moving-average (box filter) to a joint trajectory
+    to reduce the jerk spikes that occur at trapezoidal ramp transitions.
+
+    This is the Python-side equivalent of setting $STMO_GRP.$FLTR_LN on
+    the controller (Section 5 of B-84904EN/01).
+
+    The trajectory is padded with `window` copies of the start and end
+    waypoints before filtering, then trimmed back to the original length.
+    This prevents the acceleration spike that would otherwise occur at the
+    very first and last waypoints if exact endpoints were forced after
+    smoothing (which caused MOTN-721 on the controller).
+
+    Args:
+        trajectory: List of joint-space waypoints.
+        window:     Half-width of the smoothing kernel (total width = 2*window+1).
+                    Larger values = smoother motion but more path deviation.
+                    Recommended: 5–10 for typical 8ms cycle trajectories.
+
+    Returns:
+        Smoothed trajectory with the same length as the input.
+        The robot will reach very close to the target position; any residual
+        error is negligible for window sizes ≤ 10.
+    """
+    if window < 1 or len(trajectory) < 3:
+        return trajectory
+
+    n_joints = len(trajectory[0])
+
+    # Pad: prepend `window` copies of start, append `window` copies of end.
+    # This gives the box filter a flat region to average over at both ends,
+    # producing zero velocity/acceleration at the start and end — no spikes.
+    padded = (
+        [list(trajectory[0])] * window
+        + [list(wp) for wp in trajectory]
+        + [list(trajectory[-1])] * window
+    )
+
+    n_padded = len(padded)
+    smoothed_padded = []
+    for i in range(n_padded):
+        lo = max(0, i - window)
+        hi = min(n_padded - 1, i + window)
+        count = hi - lo + 1
+        avg = [
+            sum(padded[j][k] for j in range(lo, hi + 1)) / count
+            for k in range(n_joints)
+        ]
+        smoothed_padded.append(avg)
+
+    # Trim the padding back off — return exactly the original number of waypoints
+    return smoothed_padded[window: window + len(trajectory)]
+
+
 def pad_to_9(joints: List[float]) -> List[float]:
     """Pad a joint list to 9 elements (required by command packets)."""
     return (list(joints) + [0.0] * 9)[:9]

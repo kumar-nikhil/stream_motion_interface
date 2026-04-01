@@ -283,6 +283,11 @@ class StreamMotionClient:
             "Cartesian" if data_format == DATA_FORMAT_CARTESIAN else "Joint",
         )
 
+        # Per the manual (Table 3.3c): the first command packet must use the same
+        # sequence number as the last received status packet. Each subsequent command
+        # packet increments its own counter independently (not the status seq).
+        cmd_seq_no: Optional[int] = None   # initialised from first status packet
+
         for idx, waypoint in enumerate(trajectory):
             is_last = 1 if idx == total - 1 else 0
 
@@ -301,8 +306,14 @@ class StreamMotionClient:
                 logger.warning("Robot stopped waiting for commands at waypoint %d", idx)
                 return False
 
+            # First packet: mirror the status seq; subsequent packets: increment own counter
+            if cmd_seq_no is None:
+                cmd_seq_no = s.sequence_no
+            else:
+                cmd_seq_no = (cmd_seq_no + 1) & 0xFFFFFFFF
+
             pkt = build_command_packet(
-                sequence_no = s.sequence_no,
+                sequence_no = cmd_seq_no,
                 positions   = waypoint,
                 data_format = data_format,
                 last        = is_last,
@@ -311,7 +322,7 @@ class StreamMotionClient:
             self._send(pkt)
 
             if idx % 50 == 0 or is_last:
-                logger.debug("Sent waypoint %d/%d (seq=%d, last=%d)", idx + 1, total, s.sequence_no, is_last)
+                logger.debug("Sent waypoint %d/%d (cmd_seq=%d, last=%d)", idx + 1, total, cmd_seq_no, is_last)
 
         logger.info("Trajectory complete")
         return True

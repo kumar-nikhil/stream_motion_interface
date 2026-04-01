@@ -15,7 +15,7 @@ from stream_motion import StreamMotionClient, StatusPacket
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s")
 
-ROBOT_IP   = "127.0.0.1"
+ROBOT_IP   = "192.168.56.1"  # ROBOGUIDE VM IP
 ROBOT_PORT = 60015
 
 running = True

@@ -34,6 +34,7 @@ from .constants import (
 from .trajectory import (
     trapezoidal_joint_trajectory,
     linear_joint_interpolation,
+    smooth_trajectory,
     check_limits,
     pad_to_9,
 )

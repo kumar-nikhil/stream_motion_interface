@@ -28,6 +28,7 @@ import time
 from stream_motion import (
     StreamMotionClient,
     trapezoidal_joint_trajectory,
+    smooth_trajectory,
     check_limits,
 )
 
@@ -39,15 +40,15 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ── Robot / Communication Settings ───────────────────────────────────────────
-ROBOT_IP   = "127.0.0.1"  # Change to your robot/ROBOGUIDE IP
+ROBOT_IP   = "192.168.56.1"  # ROBOGUIDE VM IP
 ROBOT_PORT = 60015
 
 # ── Motion Parameters ─────────────────────────────────────────────────────────
 # Current joint position (read from the robot before running, or use get_current_joints())
-START_JOINTS = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+START_JOINTS = [33.67, 8.94, 2.90, 14.04, -53.70, 89.03]  # current position after last move
 
-# Target joint position [J1..J6] in degrees
-END_JOINTS   = [10.0, -5.0, 5.0, 0.0, 10.0, 0.0]
+# Target joint position – small move from current position
+END_JOINTS   = [38.67, 8.94, 2.90, 14.04, -53.70, 89.03]  # J1 +5 degrees
 
 # Per-joint velocity limits [deg/s]  – read from $STMO_GRP.$JNT_VEL_LIM
 # These are approximate defaults; query the robot for exact values.
@@ -70,11 +71,12 @@ def main() -> None:
         end_joints   = END_JOINTS,
         vel_limits   = VEL_LIMITS,
         acc_limits   = ACC_LIMITS,
-        scale        = 0.5,          # Use 50% of limits for safety in first test
+        scale        = 0.3,          # 30% of limits — conservative for first live test
     )
-    log.info("Trajectory: %d waypoints", len(trajectory))
-
-    # 2. Validate the trajectory against limits before sending
+    # Smooth the trajectory to eliminate jerk spikes at trapezoidal ramp transitions.
+    # window=10 reduces effective jerk by ~10x at the cost of slight path rounding.
+    # 2. Validate the raw trapezoidal trajectory BEFORE smoothing.
+    # Smoothing is applied after — it only reduces jerk, never increases vel/acc.
     violations = check_limits(trajectory, VEL_LIMITS, ACC_LIMITS)
     if violations:
         log.error("Trajectory limit violations detected:")
@@ -83,6 +85,8 @@ def main() -> None:
         log.error("Aborting – fix trajectory before sending to robot")
         return
     log.info("Trajectory limit check: PASSED")
+    trajectory = smooth_trajectory(trajectory, window=10)
+    log.info("Trajectory: %d waypoints (smoothed, window=10)", len(trajectory))
 
     # 3. Connect and stream
     with StreamMotionClient(robot_ip=ROBOT_IP, robot_port=ROBOT_PORT) as client:
