@@ -45,7 +45,9 @@ class TestTrapezoidalTrajectory:
         traj = trapezoidal_joint_trajectory(
             start, end, VEL_LIMITS, ACC_LIMITS, scale=0.5
         )
-        violations = check_limits(traj, VEL_LIMITS, ACC_LIMITS, JRK_LIMITS)
+        # Trapezoidal profile controls vel + acc only. Jerk spikes at ramp
+        # transitions are inherent to the profile — S-curve needed for jerk control.
+        violations = check_limits(traj, VEL_LIMITS, ACC_LIMITS)  # no jrk_limits
         assert violations == [], f"Unexpected violations: {violations}"
 
     def test_same_start_and_end_returns_one_waypoint(self):
