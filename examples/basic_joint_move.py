@@ -10,8 +10,8 @@ Prerequisites
        IBGN start[1]
        IBGN end[1]
 3. The TP program is running in AUTO mode at 100% override.
-4. The robot's joints are already near the start_joints position below.
-   (Move the robot there manually before running this script.)
+4. The robot can be at any nearby joint position; this script reads
+   the actual live position before planning the trajectory.
 
 When using ROBOGUIDE on the same PC, the IP is 127.0.0.1 (default).
 
@@ -23,7 +23,6 @@ is clear.
 """
 
 import logging
-import time
 
 from stream_motion import (
     StreamMotionClient,
@@ -31,6 +30,7 @@ from stream_motion import (
     smooth_trajectory,
     check_limits,
 )
+from stream_motion.constants import CRX_VEL_LIMITS, CRX_ACC_LIMITS
 
 # ── Configure logging ─────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -44,18 +44,22 @@ ROBOT_IP   = "192.168.56.1"  # ROBOGUIDE VM IP
 ROBOT_PORT = 60015
 
 # ── Motion Parameters ─────────────────────────────────────────────────────────
-# Current joint position (read from the robot before running, or use get_current_joints())
-START_JOINTS = [33.67, 8.94, 2.90, 14.04, -53.70, 89.03]  # current position after last move
+# Relative move applied to the robot's live start position.
+# Only J1 moves (+5 degrees); all other joints stay at current position.
+DELTA_JOINTS = [5.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
-# Target joint position – small move from current position
-END_JOINTS   = [38.67, 8.94, 2.90, 14.04, -53.70, 89.03]  # J1 +5 degrees
+# Per-joint limits read from $STMO_GRP[1] on the pendant (CRX-10iA/L).
+# Using 5% margin below the actual $JNT_VEL_LIM / $JNT_ACC_LIM values.
+# Actual: VEL=[120,120,180,180,180,180], ACC=[279.9,279.9,419.9,419.9,419.9,419.9]
+VEL_LIMITS = CRX_VEL_LIMITS   # [120, 120, 180, 180, 180, 180] deg/s
+ACC_LIMITS = CRX_ACC_LIMITS   # [265, 265, 399, 399, 399, 399] deg/s²
 
-# Per-joint velocity limits [deg/s]  – read from $STMO_GRP.$JNT_VEL_LIM
-# These are approximate defaults; query the robot for exact values.
-VEL_LIMITS = [150.0, 130.0, 200.0, 270.0, 270.0, 360.0]
+# Scale factor: fraction of VEL_LIMITS used as peak velocity.
+# 0.15 → J1 peaks at 18 deg/s — very conservative for first live test.
+SCALE = 0.15
 
-# Per-joint acceleration limits [deg/s²] – read from $STMO_GRP.$JNT_ACC_LIM
-ACC_LIMITS = [500.0, 400.0, 700.0, 900.0, 900.0, 1200.0]
+# Smoothing window: larger = smoother but more endpoint deviation.
+SMOOTH_WINDOW = 10
 
 
 def main() -> None:
@@ -64,66 +68,84 @@ def main() -> None:
     log.info("Robot: %s:%d", ROBOT_IP, ROBOT_PORT)
     log.info("=" * 60)
 
-    # 1. Plan the trajectory BEFORE connecting
-    log.info("Planning trapezoidal trajectory: %s → %s", START_JOINTS, END_JOINTS)
-    trajectory = trapezoidal_joint_trajectory(
-        start_joints = START_JOINTS,
-        end_joints   = END_JOINTS,
-        vel_limits   = VEL_LIMITS,
-        acc_limits   = ACC_LIMITS,
-        scale        = 0.3,          # 30% of limits — conservative for first live test
-    )
-    # Smooth the trajectory to eliminate jerk spikes at trapezoidal ramp transitions.
-    # window=10 reduces effective jerk by ~10x at the cost of slight path rounding.
-    # 2. Validate the raw trapezoidal trajectory BEFORE smoothing.
-    # Smoothing is applied after — it only reduces jerk, never increases vel/acc.
-    violations = check_limits(trajectory, VEL_LIMITS, ACC_LIMITS)
-    if violations:
-        log.error("Trajectory limit violations detected:")
-        for v in violations:
-            log.error("  %s", v)
-        log.error("Aborting – fix trajectory before sending to robot")
-        return
-    log.info("Trajectory limit check: PASSED")
-    trajectory = smooth_trajectory(trajectory, window=10)
-    log.info("Trajectory: %d waypoints (smoothed, window=10)", len(trajectory))
-
-    # 3. Connect and stream
     with StreamMotionClient(robot_ip=ROBOT_IP, robot_port=ROBOT_PORT) as client:
 
-        # Start receiving status packets
+        # ── 1. Start receiving status packets ─────────────────────────────────
         client.start_status_output()
         log.info("Waiting for robot TP program to reach IBGN start[1]...")
 
-        # Block until bit 0 of the status byte goes HIGH
-        # (requires the TP program to be running)
         if not client.wait_for_ready(timeout=60.0):
             log.error(
                 "Robot did not become ready. Check:\n"
                 "  1. TP program is running in AUTO mode at 100%% override\n"
                 "  2. IBGN start[1] is in the program\n"
-                "  3. ROBOGUIDE/robot IP is correct\n"
-                "  4. Stream Motion option (J519) is loaded"
+                "  3. ROBOGUIDE/robot IP is correct (%s)\n"
+                "  4. Stream Motion option (J519) is loaded",
+                ROBOT_IP,
             )
             client.stop_status_output()
             return
 
-        # Print current position
-        status = client.last_status
-        log.info("Current joints: %s", [f"{j:.2f}" for j in status.joints[:6]])
-        log.info("Current cart:   %s", [f"{c:.2f}" for c in status.cart[:6]])
+        # ── 2. Read the robot's ACTUAL current joint position ─────────────────
+        # Critical: trajectory must start here so smoothed[0] ≈ current servo
+        # position. A mismatch creates an implicit velocity spike at packet 0→1
+        # that the controller detects as excessive acceleration (MOTN-721).
+        start_joints = client.get_current_joints()
+        if start_joints is None:
+            log.error("Could not read current joint positions – aborting")
+            client.stop_status_output()
+            return
 
-        # 4. Stream the trajectory
-        log.info("Streaming %d waypoints...", len(trajectory))
+        end_joints = [s + d for s, d in zip(start_joints, DELTA_JOINTS)]
+
+        log.info("Start joints: %s", [f"{j:.3f}" for j in start_joints])
+        log.info("End   joints: %s", [f"{j:.3f}" for j in end_joints])
+        log.info("Current cart: %s", [f"{c:.2f}" for c in client.get_current_cart() or []])
+
+        # ── 3. Plan trajectory from actual position ───────────────────────────
+        log.info(
+            "Planning trajectory  scale=%.2f  VEL_lim=%s  ACC_lim=%s",
+            SCALE, VEL_LIMITS, ACC_LIMITS,
+        )
+        trajectory = trapezoidal_joint_trajectory(
+            start_joints = start_joints,
+            end_joints   = end_joints,
+            vel_limits   = VEL_LIMITS,
+            acc_limits   = ACC_LIMITS,
+            scale        = SCALE,
+        )
+
+        # Validate raw trajectory against actual robot limits before smoothing
+        violations = check_limits(trajectory, VEL_LIMITS, ACC_LIMITS)
+        if violations:
+            log.error("Trajectory limit violations (aborting):")
+            for v in violations:
+                log.error("  %s", v)
+            client.stop_status_output()
+            return
+        log.info("Raw trajectory: %d waypoints – limit check PASSED", len(trajectory))
+
+        # Smooth to eliminate jerk spikes at ramp transitions.
+        # Padding approach: window copies of start are prepended before filtering
+        # so smoothed[0] stays close to start_joints (no endpoint acceleration spike).
+        trajectory = smooth_trajectory(trajectory, window=SMOOTH_WINDOW)
+        log.info("Smoothed trajectory: %d waypoints (window=%d)", len(trajectory), SMOOTH_WINDOW)
+
+        # Debug: show first few command positions so we can verify the ramp-up
+        log.info("First 5 waypoints (J1 only):")
+        for i in range(min(5, len(trajectory))):
+            log.info("  [%d] J1=%.5f°", i, trajectory[i][0])
+
+        # ── 4. Stream the trajectory ──────────────────────────────────────────
+        log.info("Streaming %d waypoints to robot...", len(trajectory))
         success = client.stream_joint_trajectory(trajectory)
 
         if success:
-            log.info("Motion complete! Waiting for robot to stop...")
-            client.wait_for_stop(timeout=5.0)
+            log.info("Motion complete! Waiting for robot to settle...")
+            client.wait_for_stop(timeout=10.0)
         else:
             log.warning("Trajectory stream returned False – check robot alarms")
 
-        # Stop status output
         client.stop_status_output()
 
     log.info("Done.")

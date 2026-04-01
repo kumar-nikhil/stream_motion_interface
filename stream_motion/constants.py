@@ -81,3 +81,20 @@ SEQ_NO_MAX = 0xFFFFFFFF                 # Rolls over to 0 after this value
 
 # ── Abnormal Position Threshold (system variable $STMO.$THRS_ABNPOS) ─────────
 THRS_ABNPOS_DEFAULT = 100_000           # mm or degrees — raise MOTN-625 if exceeded
+
+# ── CRX-10iA/L Actual Robot Limits (read from $STMO_GRP[1] on pendant) ────────
+# These are READ-ONLY reference values at full payload + max Cartesian speed.
+# ($LMT_MODE=1, so actual enforced limits may be higher at low speeds.)
+# Source: ROBOGUIDE system variables, verified 2026-04-01.
+#
+#   $STMO_GRP[1].$JNT_VEL_LIM[1..6]  [deg/s]
+CRX_VEL_LIMITS  = [120.0, 120.0, 180.0, 180.0, 180.0, 180.0]
+#
+#   $STMO_GRP[1].$JNT_ACC_LIM[1..6]  [deg/s²]  – use 5% margin
+CRX_ACC_LIMITS  = [265.0, 265.0, 399.0, 399.0, 399.0, 399.0]
+#
+#   $STMO_GRP[1].$JNT_JRK_LIM[1..6]  [deg/s³]  – use 5% margin
+CRX_JRK_LIMITS  = [1240.0, 1240.0, 1860.0, 1860.0, 1860.0, 1860.0]
+#
+#   $STMO_GRP[1].$MAX_SPD = 2000 mm/s  (Vmax for limit table interpolation)
+CRX_MAX_SPD_MMS = 2000
