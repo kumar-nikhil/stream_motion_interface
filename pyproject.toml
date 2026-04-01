@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "stream_motion_interface"
+version = "0.1.0"
+description = "Python client for FANUC Stream Motion (J519) – R-30iB/R-30iB Plus"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["fanuc", "robot", "stream-motion", "udp", "roboguide"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "basic"

@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env/
+
+# PyCharm
+.idea/
+*.iml
+*.iws
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ROBOGUIDE / FANUC
+*.cv
+*.tp
+*.vr
+*.dg
+*.mn
+*.kl

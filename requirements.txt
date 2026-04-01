@@ -1,0 +1,6 @@
+# Stream Motion Interface – Python Dependencies
+# No third-party runtime dependencies! Only stdlib (socket, struct, threading).
+#
+# Development / testing dependencies:
+pytest>=7.4
+pytest-cov>=4.1
