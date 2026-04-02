@@ -126,14 +126,20 @@ HOME_JOINTS = [0.0, 0.0, 0.0, 0.0, -90.0, 0.0]
 
 # ── Cartesian Streaming Speed Limits ─────────────────────────────────────────
 # Used by minimum_jerk_cartesian_trajectory() to compute motion duration T.
-# These are planning targets — the CRX-10iA/L hard TCP limit is still 750 mm/s
-# (SYST-323), so CRX_CART_LINEAR_MMS must stay well below that.
 #
-# Conservative defaults for initial Cartesian testing:
-#   Linear  TCP speed: 500 mm/s  (67% of the 750 mm/s collaborative limit)
-#   Angular TCP speed:  90 deg/s (reasonable for wrist-only rotations)
+# WHY these are much lower than the joint-space limits:
+# In joint streaming the IK is done by our planner, so joint vel/acc/jerk are
+# bounded explicitly.  In Cartesian streaming the controller does the IK
+# internally — we can only bound TCP Cartesian speed, NOT the resulting joint
+# accelerations.  At certain robot configurations (arm extended, wrist near
+# limits) the Jacobian amplifies Cartesian acceleration into very large joint
+# accelerations, causing MOTN-721 even at moderate TCP speeds.
 #
-# Raise these gradually once fault-free runs are confirmed — the same
-# speed-ladder approach used for joint-space moves.
-CRX_CART_LINEAR_MMS   = 500.0   # max TCP linear speed for Cartesian planning [mm/s]
-CRX_CART_ANGULAR_DEGS =  90.0   # max TCP angular speed for Cartesian planning [deg/s]
+# A Cartesian trajectory needs far more waypoints than a joint trajectory for
+# the same physical move.  500 mm/s → 11 waypoints for 20 mm → MOTN-721.
+# 50 mm/s → 94 waypoints for 20 mm → smooth motion.
+#
+# Speed ladder for Cartesian (raise after each confirmed fault-free run):
+#   50 mm/s ✓ → 100 → 150 → 200 → 250 → 300 (watch MOTN-721 at each step)
+CRX_CART_LINEAR_MMS   =  50.0   # initial safe value — raise via speed ladder [mm/s]
+CRX_CART_ANGULAR_DEGS =  20.0   # initial safe value for wrist rotation [deg/s]
