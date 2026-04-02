@@ -45,11 +45,10 @@ ROBOT_IP   = "192.168.56.1"
 ROBOT_PORT = 60015
 
 # ── Motion Parameters ─────────────────────────────────────────────────────────
-# Conservative scale: keeps peak jerk at ~5% of limit for any starting pose.
-# The planner automatically extends T to cover the largest-displacement axis,
-# so all joints arrive at HOME simultaneously (time-synchronised).
-# Increase toward 0.8 only after confirming fault-free motion at this scale.
-SCALE = 0.05
+# Scale applied to vel, acc, and jerk limits when computing T.
+# Confirmed fault-free at 0.05 (2026-04-02).  Now at 0.50 = 50% of all limits.
+# Speed ladder: 0.05 ✓ → 0.50 (current) → 0.80 → 1.00 (watch MOTN-609/610/611)
+SCALE = 0.50
 
 
 def main() -> None:

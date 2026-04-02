@@ -53,12 +53,10 @@ VEL_LIMITS = CRX_VEL_LIMITS   # [deg/s]
 ACC_LIMITS = CRX_ACC_LIMITS   # [deg/s²]
 JRK_LIMITS = CRX_JRK_LIMITS   # [deg/s³]
 
-# Safety scale applied to vel, acc, AND jerk limits when computing T.
-# The working reference project (ChatGPT version) used a hardcoded 2.8 s
-# duration for a 3° move, which puts peak jerk at ~14 deg/s³ (≈1 % of limit).
-# SCALE = 0.05 reproduces that conservatism: T ≈ 1.7 s for a 5° J1 move,
-# peak jerk ≈ 62 deg/s³ (5 % of limit).  Increase toward 0.8 once confirmed working.
-SCALE = 0.05
+# Scale applied to vel, acc, and jerk limits when computing T.
+# Confirmed fault-free at 0.05 (2026-04-02).  Now at 0.50 = 50% of all limits.
+# Speed ladder: 0.05 ✓ → 0.50 (current) → 0.80 → 1.00 (watch MOTN-609/610/611)
+SCALE = 0.50
 
 
 def main() -> None:

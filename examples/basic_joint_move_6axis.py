@@ -45,11 +45,10 @@ ROBOT_PORT = 60015
 # Using smaller values here as a conservative first test; scale up once confirmed.
 DELTA_JOINTS = [2.0, 1.0, -1.0, 2.0, -2.0, 2.0]  # [deg] per joint
 
-# Conservative scale — all peaks at ~5% of limits.
-# Speed ladder (increase after each successful test):
-#   0.05  →  0.10  →  0.20  →  0.40  →  0.80
-# Watch for: MOTN-609 (velocity), MOTN-610 (accel), MOTN-611 (jerk)
-SCALE = 0.05
+# Scale applied to vel, acc, and jerk limits when computing T.
+# Confirmed fault-free at 0.05 (2026-04-02).  Now at 0.50 = 50% of all limits.
+# Speed ladder: 0.05 ✓ → 0.50 (current) → 0.80 → 1.00 (watch MOTN-609/610/611)
+SCALE = 0.50
 
 
 def main() -> None:
