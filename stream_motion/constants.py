@@ -123,3 +123,17 @@ CRX_REACH_MM = 1249.0
 # Verified in ROBOGUIDE: safe upright pose used for large-range return moves.
 #   J1=0  J2=0  J3=0  J4=0  J5=-90  J6=0
 HOME_JOINTS = [0.0, 0.0, 0.0, 0.0, -90.0, 0.0]
+
+# ── Cartesian Streaming Speed Limits ─────────────────────────────────────────
+# Used by minimum_jerk_cartesian_trajectory() to compute motion duration T.
+# These are planning targets — the CRX-10iA/L hard TCP limit is still 750 mm/s
+# (SYST-323), so CRX_CART_LINEAR_MMS must stay well below that.
+#
+# Conservative defaults for initial Cartesian testing:
+#   Linear  TCP speed: 500 mm/s  (67% of the 750 mm/s collaborative limit)
+#   Angular TCP speed:  90 deg/s (reasonable for wrist-only rotations)
+#
+# Raise these gradually once fault-free runs are confirmed — the same
+# speed-ladder approach used for joint-space moves.
+CRX_CART_LINEAR_MMS   = 500.0   # max TCP linear speed for Cartesian planning [mm/s]
+CRX_CART_ANGULAR_DEGS =  90.0   # max TCP angular speed for Cartesian planning [deg/s]

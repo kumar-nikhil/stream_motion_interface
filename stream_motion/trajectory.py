@@ -418,6 +418,87 @@ def minimum_jerk_trajectory(
     return waypoints
 
 
+def minimum_jerk_cartesian_trajectory(
+    start_pose:           List[float],
+    end_pose:             List[float],
+    max_tcp_linear_mms:   float = 500.0,
+    max_tcp_angular_degs: float = 90.0,
+    cycle_s:              float = DEFAULT_CYCLE_S,
+) -> List[List[float]]:
+    """
+    Generate a 5th-order polynomial (minimum-jerk) Cartesian trajectory.
+
+    The TCP moves in a straight line in Cartesian space from start_pose to
+    end_pose using the same quintic time-scaling as minimum_jerk_trajectory():
+
+        p(s) = start + D · (10s³ − 15s⁴ + 6s⁵),   s ∈ [0, 1]
+
+    Motion duration T is set by whichever constraint is binding:
+      - Linear  TCP speed: T_lin = 1.875 × linear_distance_mm  / max_tcp_linear_mms
+      - Angular TCP speed: T_rot = 1.875 × max_angular_delta_deg / max_tcp_angular_degs
+
+    IMPORTANT — Cartesian streaming constraints (Section 4.1 and MOTN-156)
+    -----------------------------------------------------------------------
+    1. Only valid on 6-axis robots.
+    2. The robot configuration (wrist/elbow flip) MUST NOT change during the
+       move. If the path passes through a singularity or forces a config change,
+       the controller raises MOTN-156. Keep moves small (< 50 mm / < 30 deg)
+       until you are confident in the workspace.
+    3. For large Cartesian deltas, use joint-space streaming instead — the
+       controller handles configuration management automatically in joint space.
+
+    Args
+    ----
+    start_pose           : [X, Y, Z, W, P, R] in mm / degrees.
+                           Read from client.get_current_cart() at IBGN.
+    end_pose             : Target [X, Y, Z, W, P, R] in mm / degrees.
+    max_tcp_linear_mms   : Max TCP linear speed [mm/s].  Default 500 mm/s —
+                           conservative for CRX collaborative mode.
+    max_tcp_angular_degs : Max TCP angular speed [deg/s].  Default 90 deg/s.
+    cycle_s              : Communication cycle [s] (default 8 ms).
+
+    Returns
+    -------
+    List of [X, Y, Z, W, P, R] waypoints, one per communication cycle.
+    """
+    if len(start_pose) < 6 or len(end_pose) < 6:
+        raise ValueError("start_pose and end_pose must have at least 6 elements [X,Y,Z,W,P,R]")
+
+    d_xyz = [end_pose[i] - start_pose[i] for i in range(3)]
+    d_wpr = [end_pose[i] - start_pose[i] for i in range(3, 6)]
+
+    linear_dist = math.sqrt(sum(v ** 2 for v in d_xyz))
+    max_angular  = max(abs(v) for v in d_wpr)
+
+    # Minimum duration from each constraint
+    T_lin = (1.875 * linear_dist  / max_tcp_linear_mms)  if linear_dist  > 1e-6 else 0.0
+    T_rot = (1.875 * max_angular  / max_tcp_angular_degs) if max_angular  > 1e-6 else 0.0
+
+    T = max(T_lin, T_rot)
+
+    if T < cycle_s:
+        # Already at the target
+        return [list(end_pose)]
+
+    # Use ceil (not round) so the actual duration ≥ T, which keeps peak
+    # speed ≤ the requested limit.  round() can produce n_steps that is
+    # one cycle short, causing a small speed overshoot.
+    n_steps = max(1, math.ceil(T / cycle_s))
+
+    # Keep any extra axes (J7-J9 / extended) at start values throughout
+    extra = list(start_pose[6:]) if len(start_pose) > 6 else []
+    displacements = [end_pose[i] - start_pose[i] for i in range(6)]
+
+    waypoints: List[List[float]] = []
+    for step in range(n_steps + 1):
+        s = step / n_steps
+        pos_frac = 10*s**3 - 15*s**4 + 6*s**5
+        pose = [start_pose[i] + displacements[i] * pos_frac for i in range(6)]
+        waypoints.append(pose + extra)
+
+    return waypoints
+
+
 def pad_to_9(joints: List[float]) -> List[float]:
     """Pad a joint list to 9 elements (required by command packets)."""
     return (list(joints) + [0.0] * 9)[:9]
