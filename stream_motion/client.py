@@ -30,6 +30,7 @@ from .constants import (
     DATA_FORMAT_CARTESIAN,
     IO_TYPE_NONE,
     PROTOCOL_VERSION_1,
+    PROTOCOL_VERSION_DEFAULT,
     LIMIT_TYPE_VELOCITY,
     LIMIT_TYPE_ACCELERATION,
     LIMIT_TYPE_JERK,
@@ -76,7 +77,7 @@ class StreamMotionClient:
         robot_ip:   str   = ROBOT_DEFAULT_IP,
         robot_port: int   = ROBOT_UDP_PORT,
         timeout:    float = SOCKET_TIMEOUT_S,
-        version:    int   = PROTOCOL_VERSION_1,
+        version:    int   = PROTOCOL_VERSION_DEFAULT,
     ):
         self.robot_ip   = robot_ip
         self.robot_port = robot_port

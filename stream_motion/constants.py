@@ -24,6 +24,11 @@ PKT_TYPE_CMD_POS_RESPONSE= 4            # Robot → External Device  (Table 4.4b
 PROTOCOL_VERSION_1 = 1                   # Base version (joint only)
 PROTOCOL_VERSION_2 = 2                   # Adds double-precision Cartesian (Appendix E.1)
 PROTOCOL_VERSION_3 = 3                   # Adds comm timing adjustment (Appendix E.2)
+#
+# CRX-10iA/L in ROBOGUIDE confirmed: robot reports max_version = 3
+# Version 3 enables adaptive deceleration and dynamic status rate — safer for
+# high-speed streaming.  Use this as the default for all new scripts.
+PROTOCOL_VERSION_DEFAULT = PROTOCOL_VERSION_3
 
 # ── Position Data Formats (Command Packet – data_format field) ────────────────
 DATA_FORMAT_CARTESIAN = 0               # XYZ + WPR + 3 extended axes (6-axis robots only)
@@ -98,3 +103,8 @@ CRX_JRK_LIMITS  = [1240.0, 1240.0, 1860.0, 1860.0, 1860.0, 1860.0]
 #
 #   $STMO_GRP[1].$MAX_SPD = 2000 mm/s  (Vmax for limit table interpolation)
 CRX_MAX_SPD_MMS = 2000
+
+# ── CRX-10iA/L Home Position [deg] ───────────────────────────────────────────
+# Verified in ROBOGUIDE: safe upright pose used for large-range return moves.
+#   J1=0  J2=0  J3=0  J4=0  J5=-90  J6=0
+HOME_JOINTS = [0.0, 0.0, 0.0, 0.0, -90.0, 0.0]
