@@ -140,6 +140,12 @@ HOME_JOINTS = [0.0, 0.0, 0.0, 0.0, -90.0, 0.0]
 # 50 mm/s → 94 waypoints for 20 mm → smooth motion.
 #
 # Speed ladder for Cartesian (raise after each confirmed fault-free run):
-#   50 mm/s ✓ → 100 → 150 → 200 → 250 → 300 (watch MOTN-721 at each step)
-CRX_CART_LINEAR_MMS   =  50.0   # initial safe value — raise via speed ladder [mm/s]
-CRX_CART_ANGULAR_DEGS =  20.0   # initial safe value for wrist rotation [deg/s]
+#   50 mm/s ✓ → 150 mm/s ✓ → 200 → 250 → 300 (watch MOTN-721 at each step)
+#
+# 150 mm/s matches the GPT project's effective speed (3.0s fixed for 200mm ≈ 125 mm/s)
+# and gives sensible waypoint counts:
+#   20 mm  → 32 waypoints  T=0.25s
+#   50 mm  → 79 waypoints  T=0.63s
+#   200 mm → 313 waypoints T=2.50s   (GPT: 375 @ 3.0s)
+CRX_CART_LINEAR_MMS   = 150.0   # confirmed safe — raise via speed ladder [mm/s]
+CRX_CART_ANGULAR_DEGS =  45.0   # confirmed safe for wrist rotation [deg/s]
