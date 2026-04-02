@@ -32,6 +32,7 @@ from .constants import (
     STATUS_ROBOT_MOVING,
 )
 from .trajectory import (
+    minimum_jerk_trajectory,
     trapezoidal_joint_trajectory,
     linear_joint_interpolation,
     smooth_trajectory,
@@ -48,6 +49,7 @@ __all__ = [
     "build_status_stop_packet",
     "build_command_packet",
     "parse_status_packet",
+    "minimum_jerk_trajectory",
     "trapezoidal_joint_trajectory",
     "linear_joint_interpolation",
     "check_limits",

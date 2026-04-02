@@ -26,11 +26,10 @@ import logging
 
 from stream_motion import (
     StreamMotionClient,
-    trapezoidal_joint_trajectory,
-    smooth_trajectory,
+    minimum_jerk_trajectory,
     check_limits,
 )
-from stream_motion.constants import CRX_VEL_LIMITS, CRX_ACC_LIMITS
+from stream_motion.constants import CRX_VEL_LIMITS, CRX_ACC_LIMITS, CRX_JRK_LIMITS
 
 # ── Configure logging ─────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -48,18 +47,16 @@ ROBOT_PORT = 60015
 # Only J1 moves (+5 degrees); all other joints stay at current position.
 DELTA_JOINTS = [5.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
-# Per-joint limits read from $STMO_GRP[1] on the pendant (CRX-10iA/L).
-# Using 5% margin below the actual $JNT_VEL_LIM / $JNT_ACC_LIM values.
-# Actual: VEL=[120,120,180,180,180,180], ACC=[279.9,279.9,419.9,419.9,419.9,419.9]
-VEL_LIMITS = CRX_VEL_LIMITS   # [120, 120, 180, 180, 180, 180] deg/s
-ACC_LIMITS = CRX_ACC_LIMITS   # [265, 265, 399, 399, 399, 399] deg/s²
+# Per-joint limits from $STMO_GRP[1] on the pendant (CRX-10iA/L).
+# Actual: VEL=[120,120,180,180,180,180], ACC=[279.9,...], JRK=[1240,...,1860,...]
+VEL_LIMITS = CRX_VEL_LIMITS   # [deg/s]
+ACC_LIMITS = CRX_ACC_LIMITS   # [deg/s²]
+JRK_LIMITS = CRX_JRK_LIMITS   # [deg/s³]
 
-# Scale factor: fraction of VEL_LIMITS used as peak velocity.
-# 0.15 → J1 peaks at 18 deg/s — very conservative for first live test.
-SCALE = 0.15
-
-# Smoothing window: larger = smoother but more endpoint deviation.
-SMOOTH_WINDOW = 10
+# Safety scale: 0.8 = 80% of all limits (vel, acc, and jerk).
+# The minimum-jerk planner uses this to set the motion duration T so that
+# peak velocity, acceleration, and jerk all stay within limits × scale.
+SCALE = 0.8
 
 
 def main() -> None:
@@ -104,37 +101,39 @@ def main() -> None:
 
         # ── 3. Plan trajectory from actual position ───────────────────────────
         log.info(
-            "Planning trajectory  scale=%.2f  VEL_lim=%s  ACC_lim=%s",
-            SCALE, VEL_LIMITS, ACC_LIMITS,
+            "Planning trajectory  scale=%.2f  VEL_lim=%s  ACC_lim=%s  JRK_lim=%s",
+            SCALE, VEL_LIMITS, ACC_LIMITS, JRK_LIMITS,
         )
-        trajectory = trapezoidal_joint_trajectory(
+        # minimum_jerk_trajectory uses a 5th-order polynomial: p = D*(10s³-15s⁴+6s⁵)
+        # - Zero velocity AND acceleration at start/end → no filter needed
+        # - First position step ≈ 10*D/N³ (cubic, tiny) → no jerk spike at packet 1
+        # - T is computed to satisfy vel, acc, AND jerk limits simultaneously
+        trajectory = minimum_jerk_trajectory(
             start_joints = start_joints,
             end_joints   = end_joints,
             vel_limits   = VEL_LIMITS,
             acc_limits   = ACC_LIMITS,
+            jrk_limits   = JRK_LIMITS,
             scale        = SCALE,
         )
 
-        # Validate raw trajectory against actual robot limits before smoothing
-        violations = check_limits(trajectory, VEL_LIMITS, ACC_LIMITS)
+        # Validate the trajectory against all three limits
+        violations = check_limits(trajectory, VEL_LIMITS, ACC_LIMITS, JRK_LIMITS)
         if violations:
             log.error("Trajectory limit violations (aborting):")
             for v in violations:
                 log.error("  %s", v)
             client.stop_status_output()
             return
-        log.info("Raw trajectory: %d waypoints – limit check PASSED", len(trajectory))
+        log.info("Trajectory: %d waypoints – limit check PASSED", len(trajectory))
 
-        # Smooth to eliminate jerk spikes at ramp transitions.
-        # Padding approach: window copies of start are prepended before filtering
-        # so smoothed[0] stays close to start_joints (no endpoint acceleration spike).
-        trajectory = smooth_trajectory(trajectory, window=SMOOTH_WINDOW)
-        log.info("Smoothed trajectory: %d waypoints (window=%d)", len(trajectory), SMOOTH_WINDOW)
-
-        # Debug: show first few command positions so we can verify the ramp-up
-        log.info("First 5 waypoints (J1 only):")
-        for i in range(min(5, len(trajectory))):
-            log.info("  [%d] J1=%.5f°", i, trajectory[i][0])
+        # Debug: show first 6 waypoints and step sizes to verify cubic ramp-up
+        log.info("First 6 waypoints (J1):  Δ = position change per 8ms step")
+        prev = trajectory[0][0]
+        for i in range(min(6, len(trajectory))):
+            cur = trajectory[i][0]
+            log.info("  [%d] J1=%.5f°  Δ=%.5f°", i, cur, cur - prev)
+            prev = cur
 
         # ── 4. Stream the trajectory ──────────────────────────────────────────
         log.info("Streaming %d waypoints to robot...", len(trajectory))

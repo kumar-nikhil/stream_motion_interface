@@ -301,6 +301,101 @@ def smooth_trajectory(
     return result
 
 
+def minimum_jerk_trajectory(
+    start_joints:  List[float],
+    end_joints:    List[float],
+    vel_limits:    List[float],
+    acc_limits:    List[float],
+    jrk_limits:    List[float],
+    cycle_s:       float = DEFAULT_CYCLE_S,
+    scale:         float = 0.8,
+) -> List[List[float]]:
+    """
+    Generate a 5th-order polynomial (minimum-jerk) joint trajectory.
+
+    Position profile (per axis):
+        p(s) = start + D · (10s³ − 15s⁴ + 6s⁵),   s ∈ [0, 1]
+
+    Properties
+    ----------
+    - Zero velocity AND zero acceleration at both endpoints — no post-
+      filtering required and no jerk spike at the very first command packet.
+    - Jerk is bounded everywhere; peak values (D=1, T=1 normalisation):
+        peak velocity  = 1.875 · D / T     (at s = 0.5)
+        peak accel     = 5.773 · D / T²    (at s ≈ 0.211 and 0.789)
+        peak jerk      = 60    · D / T³    (at s = 0 and s = 1)
+    - The first position step grows as ~10·D/(N³) — cubic, not quadratic —
+      so even if the servo position differs from cmd[0] by a small δ, the
+      resulting jerk at the controller is well within limits.
+
+    Why this avoids MOTN-722
+    ------------------------
+    A trapezoidal profile followed by a box-filter creates an artificial
+    velocity spike at position [1] because the box kernel at index 1 already
+    "sees" far-future trajectory values that are well above start.  With a
+    minimum-jerk profile there is no filter; the trajectory itself has the
+    correct shape, and the first step is so small (~0.00005° for a 5° move
+    over 80 steps) that any residual servo-to-cmd[0] gap does not produce
+    excessive acceleration or jerk.
+
+    Args
+    ----
+    start_joints : Starting joint angles [deg].
+    end_joints   : Target joint angles [deg].
+    vel_limits   : Per-joint velocity limits [deg/s]   ($JNT_VEL_LIM).
+    acc_limits   : Per-joint accel limits   [deg/s²]   ($JNT_ACC_LIM).
+    jrk_limits   : Per-joint jerk limits    [deg/s³]   ($JNT_JRK_LIM).
+    cycle_s      : Communication cycle [s] (default 8 ms).
+    scale        : Safety margin: limits are multiplied by this factor
+                   (default 0.8 = 80 %).  Keep ≤ 1.0.
+
+    Returns
+    -------
+    List of joint-space waypoints, one per communication cycle.
+    """
+    n_joints = len(start_joints)
+    assert len(end_joints) == n_joints
+
+    displacements = [end_joints[i] - start_joints[i] for i in range(n_joints)]
+
+    T_per_axis: List[float] = []
+    for i, d in enumerate(displacements):
+        if abs(d) < 1e-9:
+            T_per_axis.append(0.0)
+            continue
+
+        v_lim = vel_limits[i] * scale
+        a_lim = acc_limits[i] * scale
+        j_lim = jrk_limits[i] * scale
+
+        # Minimum duration that keeps each physical limit satisfied
+        T_v = 1.875 * abs(d) / v_lim                   # velocity
+        T_a = math.sqrt(5.773 * abs(d) / a_lim)        # acceleration
+        T_j = (60.0  * abs(d) / j_lim) ** (1.0 / 3.0) # jerk
+
+        T_per_axis.append(max(T_v, T_a, T_j))
+
+    T = max(T_per_axis) if T_per_axis else 0.0
+
+    if T < cycle_s:
+        # Already at the target — return a single waypoint
+        return [list(end_joints)]
+
+    n_steps = max(1, round(T / cycle_s))
+
+    waypoints: List[List[float]] = []
+    for step in range(n_steps + 1):
+        s = step / n_steps                         # normalised time [0..1]
+        pos_frac = 10*s**3 - 15*s**4 + 6*s**5    # 5th-order polynomial
+        joints = [
+            start_joints[i] + displacements[i] * pos_frac
+            for i in range(n_joints)
+        ]
+        waypoints.append(joints)
+
+    return waypoints
+
+
 def pad_to_9(joints: List[float]) -> List[float]:
     """Pad a joint list to 9 elements (required by command packets)."""
     return (list(joints) + [0.0] * 9)[:9]
