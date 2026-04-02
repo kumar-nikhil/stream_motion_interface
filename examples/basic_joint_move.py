@@ -53,10 +53,12 @@ VEL_LIMITS = CRX_VEL_LIMITS   # [deg/s]
 ACC_LIMITS = CRX_ACC_LIMITS   # [deg/s²]
 JRK_LIMITS = CRX_JRK_LIMITS   # [deg/s³]
 
-# Safety scale: 0.8 = 80% of all limits (vel, acc, and jerk).
-# The minimum-jerk planner uses this to set the motion duration T so that
-# peak velocity, acceleration, and jerk all stay within limits × scale.
-SCALE = 0.8
+# Safety scale applied to vel, acc, AND jerk limits when computing T.
+# The working reference project (ChatGPT version) used a hardcoded 2.8 s
+# duration for a 3° move, which puts peak jerk at ~14 deg/s³ (≈1 % of limit).
+# SCALE = 0.05 reproduces that conservatism: T ≈ 1.7 s for a 5° J1 move,
+# peak jerk ≈ 62 deg/s³ (5 % of limit).  Increase toward 0.8 once confirmed working.
+SCALE = 0.05
 
 
 def main() -> None:
