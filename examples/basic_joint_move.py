@@ -29,7 +29,13 @@ from stream_motion import (
     minimum_jerk_trajectory,
     check_limits,
 )
-from stream_motion.constants import CRX_VEL_LIMITS, CRX_ACC_LIMITS, CRX_JRK_LIMITS
+from stream_motion.constants import (
+    CRX_VEL_LIMITS,
+    CRX_ACC_LIMITS,
+    CRX_JRK_LIMITS,
+    CRX_COLLAB_TCP_PLAN_MMS,
+    CRX_REACH_MM,
+)
 
 # ── Configure logging ─────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -109,12 +115,14 @@ def main() -> None:
         # - First position step ≈ 10*D/N³ (cubic, tiny) → no jerk spike at packet 1
         # - T is computed to satisfy vel, acc, AND jerk limits simultaneously
         trajectory = minimum_jerk_trajectory(
-            start_joints = start_joints,
-            end_joints   = end_joints,
-            vel_limits   = VEL_LIMITS,
-            acc_limits   = ACC_LIMITS,
-            jrk_limits   = JRK_LIMITS,
-            scale        = SCALE,
+            start_joints      = start_joints,
+            end_joints        = end_joints,
+            vel_limits        = VEL_LIMITS,
+            acc_limits        = ACC_LIMITS,
+            jrk_limits        = JRK_LIMITS,
+            scale             = SCALE,
+            max_tcp_speed_mms = CRX_COLLAB_TCP_PLAN_MMS,
+            robot_reach_mm    = CRX_REACH_MM,
         )
 
         # Validate the trajectory against all three limits

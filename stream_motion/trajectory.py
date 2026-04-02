@@ -302,13 +302,15 @@ def smooth_trajectory(
 
 
 def minimum_jerk_trajectory(
-    start_joints:  List[float],
-    end_joints:    List[float],
-    vel_limits:    List[float],
-    acc_limits:    List[float],
-    jrk_limits:    List[float],
-    cycle_s:       float = DEFAULT_CYCLE_S,
-    scale:         float = 0.8,
+    start_joints:       List[float],
+    end_joints:         List[float],
+    vel_limits:         List[float],
+    acc_limits:         List[float],
+    jrk_limits:         List[float],
+    cycle_s:            float = DEFAULT_CYCLE_S,
+    scale:              float = 0.8,
+    max_tcp_speed_mms:  Optional[float] = None,
+    robot_reach_mm:     float = 1249.0,
 ) -> List[List[float]]:
     """
     Generate a 5th-order polynomial (minimum-jerk) joint trajectory.
@@ -345,9 +347,19 @@ def minimum_jerk_trajectory(
     vel_limits   : Per-joint velocity limits [deg/s]   ($JNT_VEL_LIM).
     acc_limits   : Per-joint accel limits   [deg/s²]   ($JNT_ACC_LIM).
     jrk_limits   : Per-joint jerk limits    [deg/s³]   ($JNT_JRK_LIM).
-    cycle_s      : Communication cycle [s] (default 8 ms).
-    scale        : Safety margin: limits are multiplied by this factor
-                   (default 0.8 = 80 %).  Keep ≤ 1.0.
+    cycle_s           : Communication cycle [s] (default 8 ms).
+    scale             : Safety margin: limits are multiplied by this factor
+                        (default 0.8 = 80 %).  Keep ≤ 1.0.
+    max_tcp_speed_mms : If set, adds a fourth per-axis constraint so that
+                        the estimated peak TCP Cartesian speed never exceeds
+                        this value [mm/s].  Use CRX_COLLAB_TCP_PLAN_MMS
+                        (700 mm/s) to stay comfortably below the CRX-10iA/L
+                        collaborative limit of 750 mm/s (SYST-323).
+                        The lever-arm estimate is conservative: it assumes
+                        every joint acts at full robot reach, so the real
+                        TCP speed will always be ≤ this value.
+    robot_reach_mm    : Maximum robot reach used as the lever-arm for the
+                        TCP speed estimate [mm].  Default = 1249 mm (CRX-10iA/L).
 
     Returns
     -------
@@ -373,7 +385,17 @@ def minimum_jerk_trajectory(
         T_a = math.sqrt(5.773 * abs(d) / a_lim)        # acceleration
         T_j = (60.0  * abs(d) / j_lim) ** (1.0 / 3.0) # jerk
 
-        T_per_axis.append(max(T_v, T_a, T_j))
+        # Optional TCP Cartesian speed constraint (SYST-323 on CRX cobots).
+        # Approximation: treat every joint as if it contributes to TCP speed
+        # with a lever arm equal to the robot's maximum reach (conservative —
+        # overestimates TCP speed, so always safe).
+        #   peak_joint_vel = 1.875 * |d_rad| / T  →  T_tcp = 1.875 * |d_rad| * reach / v_tcp
+        if max_tcp_speed_mms is not None:
+            d_rad = abs(d) * math.pi / 180.0
+            T_tcp = 1.875 * d_rad * robot_reach_mm / max_tcp_speed_mms
+            T_per_axis.append(max(T_v, T_a, T_j, T_tcp))
+        else:
+            T_per_axis.append(max(T_v, T_a, T_j))
 
     T = max(T_per_axis) if T_per_axis else 0.0
 

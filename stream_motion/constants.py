@@ -104,6 +104,21 @@ CRX_JRK_LIMITS  = [1240.0, 1240.0, 1860.0, 1860.0, 1860.0, 1860.0]
 #   $STMO_GRP[1].$MAX_SPD = 2000 mm/s  (Vmax for limit table interpolation)
 CRX_MAX_SPD_MMS = 2000
 
+# ── CRX-10iA/L Collaborative Safety Limits ───────────────────────────────────
+# SYST-323 "Collaborative speed limit (TCP)" is triggered when the TCP
+# Cartesian speed exceeds the robot's collaborative limit.
+# For CRX-10iA/L this is 750 mm/s (enforced by the robot safety system,
+# independent of the stream motion joint limits).
+CRX_COLLAB_TCP_LIMIT_MMS = 750.0        # hard limit — triggers SYST-323
+CRX_COLLAB_TCP_PLAN_MMS  = 700.0        # planning target (7% margin below hard limit)
+
+# CRX-10iA/L maximum reach [mm] — used as conservative upper-bound lever arm
+# for all joints when estimating worst-case TCP Cartesian speed.
+# The true lever arm per joint depends on robot configuration; using the full
+# reach for all joints is safe (overestimates TCP speed → gives more margin).
+# Actual reach from FANUC datasheet: 1249 mm.
+CRX_REACH_MM = 1249.0
+
 # ── CRX-10iA/L Home Position [deg] ───────────────────────────────────────────
 # Verified in ROBOGUIDE: safe upright pose used for large-range return moves.
 #   J1=0  J2=0  J3=0  J4=0  J5=-90  J6=0

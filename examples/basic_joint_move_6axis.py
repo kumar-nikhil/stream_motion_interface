@@ -25,7 +25,13 @@ from stream_motion import (
     minimum_jerk_trajectory,
     check_limits,
 )
-from stream_motion.constants import CRX_VEL_LIMITS, CRX_ACC_LIMITS, CRX_JRK_LIMITS
+from stream_motion.constants import (
+    CRX_VEL_LIMITS,
+    CRX_ACC_LIMITS,
+    CRX_JRK_LIMITS,
+    CRX_COLLAB_TCP_PLAN_MMS,
+    CRX_REACH_MM,
+)
 
 # ── Configure logging ─────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -82,12 +88,14 @@ def main() -> None:
 
         # Plan: minimum-jerk profile, time-synchronised across all 6 axes
         trajectory = minimum_jerk_trajectory(
-            start_joints = start_joints,
-            end_joints   = end_joints,
-            vel_limits   = CRX_VEL_LIMITS,
-            acc_limits   = CRX_ACC_LIMITS,
-            jrk_limits   = CRX_JRK_LIMITS,
-            scale        = SCALE,
+            start_joints      = start_joints,
+            end_joints        = end_joints,
+            vel_limits        = CRX_VEL_LIMITS,
+            acc_limits        = CRX_ACC_LIMITS,
+            jrk_limits        = CRX_JRK_LIMITS,
+            scale             = SCALE,
+            max_tcp_speed_mms = CRX_COLLAB_TCP_PLAN_MMS,
+            robot_reach_mm    = CRX_REACH_MM,
         )
 
         violations = check_limits(trajectory, CRX_VEL_LIMITS, CRX_ACC_LIMITS, CRX_JRK_LIMITS)
