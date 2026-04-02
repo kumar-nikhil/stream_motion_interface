@@ -1,6 +1,6 @@
 # stream_motion_interface
 
-A Python UDP client for the **FANUC Stream Motion (J519)** interface, targeting the **CRX-10iA/L** collaborative robot. Built for high-resolution joint-space motion streaming, with a path toward ROS integration.
+A Python UDP client for the **FANUC Stream Motion (J519)** interface, targeting the **CRX-10iA/L** collaborative robot. Built for high-resolution joint-space and Cartesian motion streaming, with a path toward ROS integration.
 
 > **Reference manual**: B-84904EN/01 — Stream Motion for R-30iB/R-30iB Plus
 > **Tested on**: FANUC CRX-10iA/L (ROBOGUIDE simulation at `192.168.56.1`)
@@ -9,14 +9,14 @@ A Python UDP client for the **FANUC Stream Motion (J519)** interface, targeting 
 
 ## What this is
 
-Stream Motion (option J519) lets an external PC send joint-space (or Cartesian) position commands to the robot at the controller's native 8 ms servo cycle. This replaces FANUC's Remote Motion Interface with a much higher-resolution UDP protocol — one command packet every 8 ms instead of every 12 ms or slower.
+Stream Motion (option J519) lets an external PC send joint-space or Cartesian position commands to the robot at the controller's native 8 ms servo cycle — one command every 8 ms instead of every 12 ms or slower.
 
 This library handles:
 - UDP handshake and status-paced command loop
-- 5th-order polynomial (minimum-jerk) trajectory generation with full vel/acc/jerk limits
-- TCP Cartesian speed capping for CRX cobot collaborative mode (SYST-323 prevention)
-- Pre-flight limit checking before any motion
-- Live joint position read at IBGN for accurate start position
+- **Joint streaming**: 5th-order polynomial (minimum-jerk) trajectory with full vel/acc/jerk limits and TCP speed capping (SYST-323 prevention)
+- **Cartesian streaming**: straight-line TCP moves with configurable linear and angular speed limits
+- Pre-flight limit checking before any joint motion
+- Live position read at IBGN (joint and Cartesian) for accurate start position
 
 ---
 
@@ -68,14 +68,16 @@ The robot stops at line 5 (`IBGN start[1]`) and waits. When the Python client se
 ### 3. System variables (verify on pendant)
 
 ```
-$STMO.$PHYS_PORT   = 2       (CD38B — default)
-$STMO_GRP[1].$FLTR_LN = 1   (set in TP program)
-$STMO.$PKT_STACK   = 10      (command buffer depth)
+$STMO.$PHYS_PORT      = 2     (CD38B — default)
+$STMO_GRP[1].$FLTR_LN = 1    (set in TP program above)
+$STMO.$PKT_STACK      = 10   (command buffer depth)
 ```
 
 ---
 
 ## Quick Start
+
+### Joint-space move
 
 ```python
 from stream_motion import StreamMotionClient, minimum_jerk_trajectory
@@ -86,9 +88,9 @@ from stream_motion.constants import (
 
 with StreamMotionClient(robot_ip="192.168.56.1") as client:
     client.start_status_output()
-    client.wait_for_ready(timeout=30.0)     # blocks until IBGN start[1]
+    client.wait_for_ready(timeout=30.0)
 
-    start = client.get_current_joints()     # live servo position
+    start = client.get_current_joints()     # live servo position at IBGN
     end   = [s + d for s, d in zip(start, [5, 0, 0, 0, 0, 0])]
 
     trajectory = minimum_jerk_trajectory(
@@ -98,11 +100,35 @@ with StreamMotionClient(robot_ip="192.168.56.1") as client:
         acc_limits        = CRX_ACC_LIMITS,
         jrk_limits        = CRX_JRK_LIMITS,
         scale             = 0.50,
-        max_tcp_speed_mms = CRX_COLLAB_TCP_PLAN_MMS,  # SYST-323 guard
+        max_tcp_speed_mms = CRX_COLLAB_TCP_PLAN_MMS,
         robot_reach_mm    = CRX_REACH_MM,
     )
 
     client.stream_joint_trajectory(trajectory)
+    client.stop_status_output()
+```
+
+### Cartesian move
+
+```python
+from stream_motion import StreamMotionClient, minimum_jerk_cartesian_trajectory
+from stream_motion.constants import CRX_CART_LINEAR_MMS, CRX_CART_ANGULAR_DEGS
+
+with StreamMotionClient(robot_ip="192.168.56.1") as client:
+    client.start_status_output()
+    client.wait_for_ready(timeout=30.0)
+
+    start = client.get_current_cart()       # live [X,Y,Z,W,P,R] at IBGN
+    end   = [start[i] + d for i, d in enumerate([20, 0, 0, 0, 0, 0])]
+
+    trajectory = minimum_jerk_cartesian_trajectory(
+        start_pose           = start,
+        end_pose             = end,
+        max_tcp_linear_mms   = CRX_CART_LINEAR_MMS,
+        max_tcp_angular_degs = CRX_CART_ANGULAR_DEGS,
+    )
+
+    client.stream_cartesian_trajectory(trajectory)
     client.stop_status_output()
 ```
 
@@ -113,75 +139,84 @@ with StreamMotionClient(robot_ip="192.168.56.1") as client:
 All examples are in `examples/`. Set `ROBOT_IP` at the top of each file.
 
 ### `basic_joint_move.py`
-Moves J1 by +5° from the robot's current position. Good first test — small, single-axis, easy to verify visually.
-
-```bash
-python examples/basic_joint_move.py
-```
+Moves J1 by +5° from the robot's current position. Good first test — small, single-axis.
 
 ### `basic_joint_move_6axis.py`
-Moves all 6 joints simultaneously by a small delta (`[+2, +1, -1, +2, -2, +2]` degrees). All axes are time-synchronised — every joint starts and finishes at the same time.
-
-```bash
-python examples/basic_joint_move_6axis.py
-```
+Moves all 6 joints simultaneously by `[+2, +1, -1, +2, -2, +2]` degrees. All axes time-synchronised — every joint starts and finishes together.
 
 ### `move_to_home.py`
-Moves from any current position to the canonical home pose `[0, 0, 0, 0, -90, 0]`. This is the hardest test — large multi-axis displacement requires the TCP speed constraint to engage.
+Moves from any current position to `[0, 0, 0, 0, -90, 0]`. The hardest joint test — large multi-axis displacement exercises the TCP speed constraint.
 
-```bash
-python examples/move_to_home.py
-```
+### `basic_cartesian_move.py`
+Moves the TCP by a Cartesian delta `[X, Y, Z, W, P, R]`. Default: `+200mm X`. Reads the live TCP pose at IBGN via `get_current_cart()`.
 
 ### `status_monitor.py`
-Prints live status packets (joint positions, Cartesian pose, status bits) without sending any motion. Useful for verifying the connection and reading the robot's current state.
-
-```bash
-python examples/status_monitor.py
-```
+Prints live status packets without sending any motion. Use to verify the connection and read the robot's current state.
 
 ---
 
 ## Trajectory Generation
 
-### `minimum_jerk_trajectory()`
+### Joint space — `minimum_jerk_trajectory()`
 
-Generates a 5th-order polynomial trajectory:
+5th-order polynomial trajectory:
 
 ```
 p(s) = start + D · (10s³ − 15s⁴ + 6s⁵),   s ∈ [0, 1]
 ```
 
-**Why this profile?**
-The FANUC controller uses the robot's current servo position as an implicit `t = −1` data point when computing velocity/acceleration/jerk for the very first command packet. Any gap between the servo position and `cmd[0]`, or any velocity spike in the trajectory shape, produces fault-triggering jerk.
+Zero velocity and zero acceleration at both endpoints — no post-filtering needed. The first position step grows as `~10·D/N³` (cubic), so any residual servo-to-command gap at the first packet produces negligible jerk.
 
-The minimum-jerk profile has zero velocity and zero acceleration at both endpoints by construction. The first position step grows as `~10·D/N³` (cubic, not quadratic) — so small that any residual servo-to-command gap is irrelevant.
-
-This is why earlier trapezoidal + box-filter approaches produced MOTN-722: the box filter's warm-up distortion at the trajectory start created a 0.030° jump at step[1], causing 101,875 deg/s³ of jerk (82× the limit).
-
-### Duration calculation
-
-For each axis, four constraints bound the minimum motion time. The longest wins:
-
+**Per-axis duration constraints** — the binding one sets T:
 ```
 T_vel  = 1.875 × |d| / (v_lim × scale)
 T_acc  = √(5.773 × |d| / (a_lim × scale))
 T_jerk = ∛(60.0 × |d| / (j_lim × scale))
-T_tcp  = 1.875 × |d_rad| × reach_mm / max_tcp_mms   ← cobot TCP limit
+T_tcp  = 1.875 × |d_rad| × reach_mm / max_tcp_mms   ← CRX cobot TCP limit
 ```
 
-All axes are then time-synchronised to the longest `T`, producing coordinated motion where every joint starts and finishes simultaneously.
+### Cartesian space — `minimum_jerk_cartesian_trajectory()`
 
-### CRX-10iA/L limits
+Same quintic time-scaling applied to `[X, Y, Z, W, P, R]` directly. The TCP moves in a straight Cartesian line.
+
+**Duration constraints:**
+```
+T_lin = 1.875 × linear_distance_mm  / max_tcp_linear_mms
+T_rot = 1.875 × max_angular_delta_deg / max_tcp_angular_degs
+T     = max(T_lin, T_rot)
+n_steps = ceil(T / 0.008)   ← ceil guarantees speed ≤ limit
+```
+
+**Why Cartesian needs lower speeds than joint:** in joint streaming our planner controls joint accelerations directly. In Cartesian streaming the controller runs its own IK — the Jacobian can amplify Cartesian acceleration into large joint accelerations at certain configurations. 500 mm/s → 11 waypoints for 20 mm → MOTN-721. 150 mm/s → 33 waypoints → smooth motion.
+
+### Waypoint counts at current speed settings
+
+| Move | Joint (SCALE=0.50) | Cartesian (150 mm/s) |
+|------|-------------------|----------------------|
+| 20 mm / 5° | 99 pts / 0.79s | 33 pts / 0.26s |
+| 50 mm | 247 pts / 1.97s | 80 pts / 0.63s |
+| 200 mm | — | 314 pts / 2.50s |
+| J2 86° home | 629 pts / 5.03s | — |
+
+---
+
+## CRX-10iA/L Constants
 
 ```python
-CRX_VEL_LIMITS = [120, 120, 180, 180, 180, 180]   # deg/s
-CRX_ACC_LIMITS = [265, 265, 399, 399, 399, 399]    # deg/s²
-CRX_JRK_LIMITS = [1240, 1240, 1860, 1860, 1860, 1860]  # deg/s³
+# Joint limits (from $STMO_GRP[1], verified on pendant)
+CRX_VEL_LIMITS  = [120, 120, 180, 180, 180, 180]       # deg/s
+CRX_ACC_LIMITS  = [265, 265, 399, 399, 399, 399]        # deg/s²
+CRX_JRK_LIMITS  = [1240, 1240, 1860, 1860, 1860, 1860] # deg/s³
 
+# Collaborative TCP limit
 CRX_COLLAB_TCP_LIMIT_MMS = 750.0   # SYST-323 hard limit
 CRX_COLLAB_TCP_PLAN_MMS  = 700.0   # planning target (7% margin)
-CRX_REACH_MM             = 1249.0  # maximum reach, used as lever-arm
+CRX_REACH_MM             = 1249.0  # lever-arm for TCP speed estimate
+
+# Cartesian streaming (speed-ladder starting point)
+CRX_CART_LINEAR_MMS   = 150.0     # confirmed safe — raise: 200 → 250 → 300 mm/s
+CRX_CART_ANGULAR_DEGS =  45.0     # confirmed safe — raise proportionally
+
 HOME_JOINTS = [0.0, 0.0, 0.0, 0.0, -90.0, 0.0]
 ```
 
@@ -189,24 +224,20 @@ HOME_JOINTS = [0.0, 0.0, 0.0, 0.0, -90.0, 0.0]
 
 ## Protocol Overview
 
-FANUC Stream Motion uses a UDP request/response pattern on port 60015.
+FANUC Stream Motion uses UDP on port 60015.
 
 ### Startup sequence
-1. Python sends **StatusOutputStart** packet (version, physical port)
-2. Robot sends **StatusPackets** every 8 ms (joint pos, Cartesian pos, status bits)
-3. Python reads status bits, waits for bit 0 = 1 (`IBGN start[*]` reached)
-4. Python reads live joint positions via `get_current_joints()`
+1. Python sends **StatusOutputStart** (version, physical port)
+2. Robot streams **StatusPackets** every 8 ms (joints, Cartesian pose, status bits)
+3. Python waits for status bit 0 = 1 (`IBGN start[*]` reached)
+4. Python reads live position via `get_current_joints()` or `get_current_cart()`
 
-### Command loop (one per 8 ms cycle)
+### Command loop
 ```
-wait for status packet  →  read status  →  send CommandPacket  →  repeat
+wait for status packet  →  send CommandPacket  →  repeat
 ```
-Each command packet carries 9 joint positions (J1–J9), `data_format` (joint or Cartesian), and a `last` flag (set on the final waypoint).
 
-### Shutdown
-- Final command packet: `last=1`
-- Python sends **StatusOutputStop**
-- Robot exits `IBGN end[*]` and finishes the TP program
+One command per 8 ms cycle. Final packet has `last=1`. Python sends **StatusOutputStop**.
 
 ### Protocol versions
 | Version | Feature |
@@ -215,7 +246,7 @@ Each command packet carries 9 joint positions (J1–J9), `data_format` (joint or
 | 2 | Adds double-precision Cartesian commands |
 | 3 | Adds comm timing adjustment, adaptive deceleration |
 
-This library defaults to **version 3** (`PROTOCOL_VERSION_DEFAULT = 3`), confirmed supported on CRX-10iA/L.
+Default: **version 3** (confirmed supported on CRX-10iA/L).
 
 ---
 
@@ -223,14 +254,14 @@ This library defaults to **version 3** (`PROTOCOL_VERSION_DEFAULT = 3`), confirm
 
 | Fault | Meaning | Common cause |
 |-------|---------|--------------|
-| MOTN-609 | Joint velocity limit exceeded | `scale` too high, or limits misconfigured |
-| MOTN-610 | Joint acceleration limit exceeded | Same as above |
-| MOTN-611 | Joint jerk limit exceeded | Same as above |
-| MOTN-721 | Velocity/accel limit exceeded (stream motion specific) | Limits in `constants.py` don't match `$STMO_GRP` pendant values |
-| MOTN-722 | Jerk limit exceeded (stream motion specific) | Trajectory shape problem at start (see trajectory section) |
-| MOTN-603 | Next command not received in time | Python too slow — check CPU load, increase `PKT_STACK` |
-| MOTN-625 | Abnormal position jump | Gap > `$THRS_ABNPOS` (100,000 mm/deg) between packets |
-| SYST-323 | Collaborative TCP speed limit | TCP Cartesian speed > 750 mm/s — pass `max_tcp_speed_mms` to trajectory |
+| MOTN-609 | Joint velocity exceeded | `scale` too high |
+| MOTN-610 | Joint acceleration exceeded | `scale` too high |
+| MOTN-611 | Joint jerk exceeded | `scale` too high |
+| MOTN-721 | Vel/acc limit (stream motion) | Limits in constants.py don't match pendant; or Cartesian speed too high |
+| MOTN-722 | Jerk limit (stream motion) | Trajectory shape problem at start — use `minimum_jerk_trajectory` |
+| MOTN-603 | Next command not received | Python too slow; increase `$PKT_STACK` |
+| MOTN-156 | Cartesian config change | Path crosses singularity or forces wrist flip — reduce delta |
+| SYST-323 | Collaborative TCP speed | TCP > 750 mm/s — pass `max_tcp_speed_mms` to joint planner |
 
 ---
 
@@ -240,16 +271,18 @@ This library defaults to **version 3** (`PROTOCOL_VERSION_DEFAULT = 3`), confirm
 stream_motion_interface/
 ├── stream_motion/
 │   ├── __init__.py        # Public API exports
-│   ├── client.py          # StreamMotionClient (UDP connection, status loop, streaming)
-│   ├── constants.py       # Protocol constants, CRX limits, home position
-│   ├── packets.py         # Packet builders and parsers (struct packing)
-│   └── trajectory.py      # minimum_jerk_trajectory(), check_limits(), helpers
+│   ├── client.py          # StreamMotionClient (UDP, status loop, streaming)
+│   ├── constants.py       # Protocol constants, CRX limits
+│   ├── packets.py         # Packet builders and parsers
+│   └── trajectory.py      # minimum_jerk_trajectory(), minimum_jerk_cartesian_trajectory(),
+│                          # check_limits(), smooth_trajectory(), helpers
 ├── examples/
 │   ├── basic_joint_move.py        # Single-axis J1 move
 │   ├── basic_joint_move_6axis.py  # Coordinated 6-axis move
 │   ├── move_to_home.py            # Move to [0,0,0,0,-90,0] from anywhere
+│   ├── basic_cartesian_move.py    # Cartesian TCP move [X,Y,Z,W,P,R]
 │   └── status_monitor.py          # Print live status packets (no motion)
-├── SESSION_NOTES.md       # Development log and fault history
+├── SESSION_NOTES.md       # Development log, fault history, speed ladders
 └── README.md
 ```
 
@@ -257,10 +290,9 @@ stream_motion_interface/
 
 ## Roadmap
 
-- **Live limit table query** — call `PKT_TYPE_LIMIT_REQUEST` to read `$JNT_VEL_LIM` etc. directly from the controller instead of hardcoding
-- **I/O in command packets** — write DO/RO bits synchronized to trajectory waypoints (gripper, tooling)
-- **Multi-segment streaming** — chain moves A→B→C without stopping the robot between segments
-- **Cartesian streaming** — `stream_cartesian_trajectory()` example with small XYZ moves
+- **Live limit table query** — read `$JNT_VEL_LIM` etc. directly from controller via `PKT_TYPE_LIMIT_REQUEST`
+- **I/O in command packets** — write DO/RO bits synchronized to waypoints (gripper, tooling)
+- **Multi-segment streaming** — chain moves A→B→C without stopping between segments
 - **ROS integration** — joint trajectory action server backed by this client
 
 ---
