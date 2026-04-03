@@ -1,5 +1,5 @@
 # Stream Motion Interface — Session Notes
-_Last updated: 2026-04-03_
+_Last updated: 2026-04-03 (session 3 — arc-blending complete, laptop restart pending)_
 
 ## Project
 - **Repo**: `C:\Users\NIKHIL\PycharmProjects\stream_motion_interface`
@@ -118,7 +118,7 @@ Protocol max version reported by robot = 3  (PROTOCOL_VERSION_3 used as default)
 | `773935d` | Raise SCALE from 0.05 to 0.50 across all examples (confirmed working) |
 | `a10ebe3` | Port learnings from stream_motion_gpt: home move, 6-axis, protocol v3 |
 
-**Current HEAD**: `ad41a2f` on `main`.
+**Current HEAD**: `3665d4f` on `main` (5 commits ahead of origin — `git push` after restart).
 
 ---
 
