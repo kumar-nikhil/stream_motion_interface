@@ -13,7 +13,7 @@ _Last updated: 2026-04-03_
 
 ## Current Status (2026-04-03)
 
-Circle confirmed fault-free. Pentagon faulted (MOTN-603 at waypoint 345) — polygon/rectangle rewritten.
+Circle confirmed fault-free. All polygons rewritten with arc-blending — pending test.
 
 ### Confirmed working
 | Script | Setting | Result |
@@ -24,11 +24,12 @@ Circle confirmed fault-free. Pentagon faulted (MOTN-603 at waypoint 345) — pol
 | `basic_cartesian_move.py` — +200mm X | 150 mm/s | ✓ Smooth, 314 waypoints, 2.5s |
 | `shapes_cartesian.py` — circle 50mm R | 150 mm/s | ✓ Full circle, no fault (trail fix) |
 
-### Pending test (after polygon rewrite)
+### Pending test (after arc-blend rewrite)
 | Script | Setting | Status |
 |--------|---------|--------|
-| `shapes_cartesian.py` — pentagon 50mm R | 150 mm/s | Rewritten — needs test |
-| `shapes_cartesian.py` — square/hexagon/rectangle | 150 mm/s | Rewritten — needs test |
+| `shapes_cartesian.py` — pentagon 50mm R | 150 mm/s, blend=10mm | Arc-blended rewrite — needs test |
+| `shapes_cartesian.py` — square/hexagon/rectangle | 150 mm/s, blend=10mm | Arc-blended rewrite — needs test |
+| `shapes_cartesian.py` — triangle | 150 mm/s, blend=10mm | Arc-blended rewrite — needs test |
 
 ### Speed ladder status
 **Joint space**: `0.05 ✓ → 0.50 ✓ → 0.80 (next on real hardware) → 1.00`
@@ -82,6 +83,7 @@ status. The background listener thread fires `_status_event` on each receipt;
 | MOTN-721 (circle, second run) | Uniform angular steps in circle → 0→150 mm/s in 8ms = 18,750 mm/s² at lead-in join | Replaced uniform steps with quintic angle profile (zero vel at both ends) |
 | MOTN-603 (circle, third run) | Windows thread wakeup latency (1–15ms) accumulated over 4.5s/571-waypoint circle drains $PKT_STACK=10 buffer | Added 20 trail dwell waypoints (160ms) at end; `last=1` lands on final trail point |
 | MOTN-603 (pentagon, first run) | Per-segment min-jerk polygon stops at each vertex (zero vel). FANUC IBGN drops `is_waiting_for_command` at zero velocity → Python sees `status=0x04`, stops sending → robot fires MOTN-603. Hit at waypoint 345/560 (mid-trajectory, 3rd side). Trail fix can't help mid-trajectory faults. | Rewrote `polygon_cartesian_trajectory` and `rectangle_cartesian_trajectory` to use quintic-perimeter (no stopping at corners), same approach as circle |
+| MOTN-721 (pentagon, R=200mm) | User set SIZE_MM=200mm (should be ≤50mm). Sharp polygon corners cause instantaneous direction change in one 8ms step: a = 2×v×sin(θ/2)/0.008. At 72° turn (pentagon) at ~143mm/s: a ≈ 21,025 mm/s² vs limit ~3426 mm/s² (J1 at 600mm reach). | Added corner arc-blending (`_build_blended_path` + `_quintic_sample_path`). 10mm blend radius caps centripetal acc at v²/r = 2250 mm/s² at 150mm/s. Reset SIZE_MM=50mm. |
 
 ---
 
@@ -103,7 +105,8 @@ Protocol max version reported by robot = 3  (PROTOCOL_VERSION_3 used as default)
 
 | Commit | Message |
 |--------|---------|
-| *pending* | Fix MOTN-603 polygon: rewrite polygon+rectangle to quintic-perimeter (no vertex stops) |
+| *pending* | Fix MOTN-721 polygon corners: arc-blending with _build_blended_path + _quintic_sample_path |
+| `ad41a2f` | Fix MOTN-603 polygon: rewrite polygon+rectangle to quintic-perimeter (no vertex stops) |
 | `295c50c` | Fix MOTN-603 circle: add 20 trail dwell waypoints at end of shape trajectory |
 | `eb737d9` | Fix MOTN-721: use quintic profile for circle (was uniform steps) |
 | `1d1aa5b` | Add shapes_cartesian.py: circle, square, polygon, rectangle, pentagon, hexagon |
@@ -115,7 +118,7 @@ Protocol max version reported by robot = 3  (PROTOCOL_VERSION_3 used as default)
 | `773935d` | Raise SCALE from 0.05 to 0.50 across all examples (confirmed working) |
 | `a10ebe3` | Port learnings from stream_motion_gpt: home move, 6-axis, protocol v3 |
 
-**Current HEAD**: `295c50c` on `main`.
+**Current HEAD**: `ad41a2f` on `main`.
 
 ---
 
@@ -215,23 +218,81 @@ Hexagon  (6×R=50): perimeter = 6 × 50   = 300 mm          → T=3.75s → 469 
 
 ---
 
+---
+
+## MOTN-721 Pentagon Corner Root Cause (2026-04-03)
+
+**Fault**: MOTN-721 "Exceeded Jnt Acc/Dec Limit" at waypoint 971/2171 during pentagon with SIZE_MM=200mm (user had raised it from 50mm).
+
+**Root cause**: The quintic-perimeter approach applied a smooth speed *magnitude* profile but the velocity *direction* changed instantaneously at each sharp polygon corner (over one 8ms step). The acceleration at a sharp corner:
+
+```
+a = 2 × v × sin(θ/2) / cycle_s
+```
+
+For a pentagon (72° exterior turn) at ~143 mm/s:
+
+```
+a = 2 × 143 × sin(36°) / 0.008 ≈ 21,025 mm/s²
+```
+
+J2 at ~600mm reach contributes roughly `a_joint ≈ a_cart / reach_rad`. The estimated joint accel ≈ 21,025/10.5 ≈ 2000 deg/s², which exceeds J1/J2 limit of 265 deg/s² → MOTN-721.
+
+**Fix**: Replaced sharp corners with circular arc fillets (`_build_blended_path`).
+
+- Each corner: detect exterior angle, compute blend distance and actual arc radius
+- Blend radius capped at 45% of the shorter adjacent side so arcs never overlap
+- Arc waypoints via Rodrigues rotation: `r_k = r·cos(θ) + (axis×r)·sin(θ) + axis(axis·r)(1−cos(θ))`
+- Returns dense path (~1mm steps) + cumulative arc-length array
+- `_quintic_sample_path` re-applies quintic time-scaling over the blended path
+
+**Centripetal acceleration at corners** (the binding constraint):
+
+```
+a_centripetal = v² / blend_radius
+```
+
+With CORNER_BLEND_MM=10mm at 150mm/s: `150²/10 = 2250 mm/s²`
+Estimated joint accel: `2250/10.5 ≈ 214 deg/s²` — below J1/J2 limit of 265 deg/s² ✓
+
+**Safe speed vs blend radius**:
+```
+blend = 5mm  → safe up to ~122 mm/s
+blend = 10mm → safe up to ~173 mm/s   ← default
+blend = 20mm → safe up to ~245 mm/s
+```
+Scale `CORNER_BLEND_MM` proportionally when raising `MAX_LINEAR_MMS`.
+
+**Measured (Python simulation)**:
+```
+pentagon (50mm R, 150mm/s, 10mm blend):  max_step=1.20mm  max_speed=149.7mm/s  max_acc_tangential=258mm/s²
+square   (50mm R, 150mm/s, 10mm blend):  max_step=1.20mm  max_speed=149.7mm/s  max_acc_tangential=145mm/s²
+triangle (50mm R, 150mm/s, 10mm blend):  max_step=1.20mm  max_speed=149.9mm/s  max_acc_tangential=816mm/s²  ← from quintic ramp, not corners
+hexagon  (50mm R, 150mm/s, 10mm blend):  max_step=1.20mm  max_speed=149.8mm/s  max_acc_tangential=1438mm/s²
+```
+Note: `max_acc_tangential` is the magnitude of speed-change rate, not the full acceleration vector. The centripetal component at corners is the same for all: v²/r ≈ 2250 mm/s².
+
+---
+
 ## Next Steps (real hardware)
 
-1. **Push latest** (from PowerShell):
+1. **Commit + push latest** (from PowerShell):
    ```powershell
    cd C:\Users\NIKHIL\PycharmProjects\stream_motion_interface
+   git add stream_motion/trajectory.py examples/shapes_cartesian.py SESSION_NOTES.md
+   git commit -m "Fix MOTN-721 polygon corners: arc-blending with _build_blended_path + _quintic_sample_path"
    git push
    ```
 
-2. **Test pentagon** in ROBOGUIDE — confirm MOTN-603 is gone with quintic-perimeter approach
+2. **Test pentagon** in ROBOGUIDE with SIZE_MM=50, CORNER_BLEND_MM=10 — confirm MOTN-721 is gone
 
-3. **Watch for MOTN-721** at corners if speed is too high (reduce `MAX_LINEAR_MMS` if needed)
+3. **If MOTN-721 persists**: increase CORNER_BLEND_MM (20mm → safe up to ~245 mm/s) or reduce MAX_LINEAR_MMS
 
 4. **Test all shapes**: square, rectangle, hexagon, triangle
 
 5. **Real-robot tests** at current settings (SCALE=0.50 joint, 150 mm/s Cartesian)
 
-5. **Speed ladders** once confirmed fault-free on real hardware:
+6. **Speed ladders** once confirmed fault-free on real hardware:
    - Joint: SCALE 0.80 → 1.00
    - Cartesian: 200 → 250 → 300 mm/s
    - Faults to watch: MOTN-609/610/611 (joint), SYST-323 (TCP), MOTN-721 (Cartesian IK)

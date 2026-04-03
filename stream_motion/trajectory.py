@@ -499,6 +499,220 @@ def minimum_jerk_cartesian_trajectory(
     return waypoints
 
 
+def _build_blended_path(
+    vertices:       List[List[float]],   # closed polygon — first vertex is start/end
+    blend_radius:   float,               # corner blend radius [mm]
+    wpr:            List[float],         # [W, P, R] orientation (held constant)
+    extra:          List[float],         # extended axes (held constant)
+) -> Tuple[List[List[float]], List[float]]:
+    """
+    Build a corner-blended closed polygon path with circular arc fillets.
+
+    At each corner the sharp turn is replaced by a circular arc of *blend_radius*.
+    This caps the centripetal acceleration at  v² / blend_radius  regardless
+    of TCP speed, eliminating MOTN-721 at corners.
+
+    Safe speed vs blend radius (conservative — J1 dominant at ~600mm reach):
+        10 mm → 185 mm/s     (default — safe for 150 mm/s with margin)
+        5  mm → 131 mm/s
+        20 mm → 262 mm/s
+
+    The path starts and ends at the *exit point* of the first vertex's arc,
+    which is used as the lead-in target in shapes_cartesian.py.
+
+    Returns
+    -------
+    (path_points, cum_arcs)
+        path_points : dense list of [X,Y,Z,W,P,R,...] waypoints at ≤1 mm intervals
+        cum_arcs    : cumulative arc-length to each path_point [mm]
+    """
+    n = len(vertices)
+    if n < 3:
+        raise ValueError("Need ≥ 3 vertices")
+
+    # ── Pre-compute blend geometry at every corner ──────────────────────────
+    blends: List[dict] = []          # one dict per vertex
+    for k in range(n):
+        v_prev = vertices[(k - 1) % n]
+        v_curr = vertices[k]
+        v_next = vertices[(k + 1) % n]
+
+        len_in  = math.sqrt(sum((v_curr[i] - v_prev[i]) ** 2 for i in range(3)))
+        len_out = math.sqrt(sum((v_next[i] - v_curr[i]) ** 2 for i in range(3)))
+        d_in    = [(v_curr[i] - v_prev[i]) / len_in  for i in range(3)]
+        d_out   = [(v_next[i] - v_curr[i]) / len_out for i in range(3)]
+
+        # Exterior (turn) angle from dot product of the two side directions
+        dot_val   = max(-1.0, min(1.0, sum(d_in[i]*d_out[i] for i in range(3))))
+        arc_angle = math.pi - math.acos(dot_val)      # exterior angle [rad]
+
+        if arc_angle < 0.01:                           # nearly straight — no blend
+            blends.append({"entry": list(v_curr), "exit": list(v_curr),
+                           "arc_angle": 0.0, "radius": 0.0,
+                           "center": list(v_curr), "axis": [0,0,1]})
+            continue
+
+        # Limit blend so it doesn't eat more than 45% of the shorter adjacent side
+        bd = blend_radius * math.tan(arc_angle / 2)
+        bd = min(bd, len_in * 0.45, len_out * 0.45)
+        r  = bd / math.tan(arc_angle / 2)
+
+        p_entry = [v_curr[i] - bd * d_in[i]  for i in range(3)]
+        p_exit  = [v_curr[i] + bd * d_out[i] for i in range(3)]
+
+        # Arc center: on the bisector of the inward normals, at r/cos(arc/2)
+        # Polygon normal (rotation axis): cross(d_in, d_out)
+        cross = [
+            d_in[1]*d_out[2] - d_in[2]*d_out[1],
+            d_in[2]*d_out[0] - d_in[0]*d_out[2],
+            d_in[0]*d_out[1] - d_in[1]*d_out[0],
+        ]
+        axis_len = math.sqrt(sum(v**2 for v in cross))
+        if axis_len < 1e-9:
+            blends.append({"entry": list(v_curr), "exit": list(v_curr),
+                           "arc_angle": 0.0, "radius": 0.0,
+                           "center": list(v_curr), "axis": [0,0,1]})
+            continue
+        axis = [v / axis_len for v in cross]           # polygon normal unit vector
+
+        # Inward normals of the two sides (axis × direction = left-hand normal for CCW)
+        n_in  = [axis[1]*d_in[2]  - axis[2]*d_in[1],
+                 axis[2]*d_in[0]  - axis[0]*d_in[2],
+                 axis[0]*d_in[1]  - axis[1]*d_in[0]]
+        n_out = [axis[1]*d_out[2] - axis[2]*d_out[1],
+                 axis[2]*d_out[0] - axis[0]*d_out[2],
+                 axis[0]*d_out[1] - axis[1]*d_out[0]]
+
+        bisector_raw = [n_in[i] + n_out[i] for i in range(3)]
+        bis_len = math.sqrt(sum(v**2 for v in bisector_raw))
+        bisector = [v / bis_len for v in bisector_raw]
+
+        center_dist = r / math.cos(arc_angle / 2)
+        center      = [v_curr[i] + center_dist * bisector[i] for i in range(3)]
+
+        blends.append({
+            "entry":     p_entry,
+            "exit":      p_exit,
+            "arc_angle": arc_angle,
+            "radius":    r,
+            "center":    center,
+            "axis":      axis,
+        })
+
+    # ── Build dense path (≤1 mm step) ───────────────────────────────────────
+    path_pts:  List[List[float]] = []
+    cum_arcs:  List[float]       = []
+
+    def push(xyz: List[float]) -> None:
+        pose = xyz[:3] + list(wpr) + list(extra)
+        if path_pts:
+            d = math.sqrt(sum((pose[i] - path_pts[-1][i]) ** 2 for i in range(3)))
+            cum_arcs.append(cum_arcs[-1] + d)
+        else:
+            cum_arcs.append(0.0)
+        path_pts.append(pose)
+
+    # Start path at blend exit of corner 0
+    push(blends[0]["exit"])
+
+    # Walk corners 1, 2, …, n-1, then 0 to close the loop
+    for k in list(range(1, n)) + [0]:
+        b = blends[k]
+
+        # Straight segment to this corner's blend entry
+        push(b["entry"])
+
+        # Arc through this corner (skip if arc_angle ≈ 0)
+        if b["arc_angle"] > 0.01 and b["radius"] > 1e-3:
+            ctr    = b["center"]
+            r_vec  = [b["entry"][i] - ctr[i] for i in range(3)]  # center → entry
+            n_pts  = max(2, round(b["radius"] * b["arc_angle"]))   # ≈ 1 mm per step
+            ax     = b["axis"]
+
+            for j in range(1, n_pts + 1):
+                theta   = b["arc_angle"] * j / n_pts
+                cos_t, sin_t = math.cos(theta), math.sin(theta)
+                dot_rv  = sum(r_vec[i] * ax[i] for i in range(3))
+                cross_rv = [
+                    ax[1]*r_vec[2] - ax[2]*r_vec[1],
+                    ax[2]*r_vec[0] - ax[0]*r_vec[2],
+                    ax[0]*r_vec[1] - ax[1]*r_vec[0],
+                ]
+                r_k = [r_vec[i]*cos_t + cross_rv[i]*sin_t + ax[i]*dot_rv*(1-cos_t)
+                       for i in range(3)]
+                push([ctr[i] + r_k[i] for i in range(3)])
+
+    return path_pts, cum_arcs
+
+
+def _quintic_sample_path(
+    path_pts:  List[List[float]],
+    cum_arcs:  List[float],
+    n_steps:   int,
+) -> List[List[float]]:
+    """
+    Apply quintic time-scaling (zero velocity at start and end) to a dense path.
+
+    Converts a high-resolution geometric path into an n_steps+1 command stream
+    whose speed profile is the 5th-order minimum-jerk polynomial:
+
+        p(u) = 10u³ − 15u⁴ + 6u⁵,   u ∈ [0, 1]
+
+    Each output waypoint is linearly interpolated between the two nearest
+    path_pts samples, so the arc-length resolution of path_pts (~1 mm)
+    bounds the geometric interpolation error.
+
+    Args
+    ----
+    path_pts : Dense list of poses (any dimension ≥ 3).
+    cum_arcs : Cumulative arc-length for each pose in path_pts [mm].
+               cum_arcs[0] must be 0.0; len == len(path_pts).
+    n_steps  : Number of time steps. Returns n_steps+1 waypoints.
+
+    Returns
+    -------
+    List of n_steps+1 interpolated poses along the path, with the quintic
+    velocity profile applied.
+    """
+    total_arc = cum_arcs[-1]
+    n_pts     = len(path_pts)
+    waypoints: List[List[float]] = []
+
+    for step in range(n_steps + 1):
+        u = step / n_steps
+        s = 10*u**3 - 15*u**4 + 6*u**5    # quintic: zero vel at both ends
+        d = s * total_arc                   # arc-length position [mm]
+
+        # Clamp to endpoints (handles floating-point edge cases)
+        if d <= 0.0:
+            waypoints.append(list(path_pts[0]))
+            continue
+        if d >= total_arc:
+            waypoints.append(list(path_pts[-1]))
+            continue
+
+        # Binary search for the segment containing arc-length d
+        lo, hi = 0, n_pts - 2
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if cum_arcs[mid + 1] < d - 1e-9:
+                lo = mid + 1
+            else:
+                hi = mid
+        seg = lo
+
+        seg_len = cum_arcs[seg + 1] - cum_arcs[seg]
+        t = (d - cum_arcs[seg]) / seg_len if seg_len > 1e-9 else 0.0
+        t = max(0.0, min(1.0, t))
+
+        p0   = path_pts[seg]
+        p1   = path_pts[seg + 1]
+        pose = [p0[i] + t * (p1[i] - p0[i]) for i in range(len(p0))]
+        waypoints.append(pose)
+
+    return waypoints
+
+
 def _plane_offsets(
     radius_mm: float,
     angle_rad: float,
@@ -597,28 +811,26 @@ def polygon_cartesian_trajectory(
     cycle_s:              float = DEFAULT_CYCLE_S,
     start_angle_deg:      float = 0.0,
     clockwise:            bool  = False,
+    corner_blend_mm:      float = 10.0,
 ) -> List[List[float]]:
     """
-    Generate a Cartesian trajectory that traces a regular polygon.
+    Generate a Cartesian trajectory that traces a regular polygon with
+    circular arc corner blending to eliminate MOTN-721.
 
-    Uses quintic time-scaling over the total perimeter — the same approach as
-    circle_cartesian_trajectory().  The TCP accelerates from zero at the first
-    vertex, reaches peak speed near the perimeter midpoint, then decelerates
-    back to zero when it returns to the first vertex (closed loop).
+    Architecture
+    ------------
+    1. Compute the N vertex positions in the chosen plane.
+    2. Replace each sharp corner with a circular arc of radius *corner_blend_mm*.
+       This caps centripetal acceleration at v²/corner_blend_mm regardless of
+       TCP speed, preventing MOTN-721 even at ≥ 150 mm/s.
+    3. Apply a single quintic time-scaling over the blended perimeter so the
+       TCP speed is zero at start/end and peaks at the midpoint — the same
+       approach as circle_cartesian_trajectory().  The robot never stops between
+       corners, so the IBGN is_waiting_for_command flag stays HIGH throughout
+       (avoiding the MOTN-603 that per-segment trajectories trigger).
 
-    WHY NOT per-segment minimum-jerk (stopping at each corner)?
-    --------------------------------------------------------------------------
-    When each side uses an independent minimum-jerk segment the robot
-    decelerates to zero velocity at every corner.  At zero velocity the
-    FANUC controller drops the IBGN is_waiting_for_command bit, causing
-    Python to detect ``status=0x04`` (SYSRDY only) and abort the stream →
-    MOTN-603 fires mid-trajectory.  The trail-dwell fix at the *end* of the
-    trajectory cannot protect *mid-trajectory* vertex transitions.
-
-    With quintic-perimeter the robot never stops between vertices, so the IBGN
-    flag stays high throughout.  The speed magnitude follows the quintic profile
-    smoothly; only the velocity *direction* changes at each corner (over one
-    8 ms step).  At 150 mm/s this direction change is well within joint limits.
+    Safe speed vs corner_blend_mm (centripetal: a = v²/r, limit ~3000 mm/s²):
+        5  mm → 122 mm/s    10 mm → 173 mm/s    20 mm → 245 mm/s
 
     Common use:
       n_sides=3  → equilateral triangle
@@ -632,16 +844,20 @@ def polygon_cartesian_trajectory(
     radius_mm            : Circumradius (centre to vertex) [mm].
     n_sides              : Number of sides (≥ 3).
     plane                : 'XY', 'XZ', or 'YZ'.
-    max_tcp_linear_mms   : Peak TCP speed [mm/s] (at perimeter midpoint).
+    max_tcp_linear_mms   : Peak TCP speed [mm/s] (at blended perimeter midpoint).
     max_tcp_angular_degs : (unused — WPR held constant).
     cycle_s              : Communication cycle [s] (default 8 ms).
     start_angle_deg      : Angle of the first vertex [deg].
                            0° → first vertex along +axis1 of the plane.
     clockwise            : Traverse clockwise if True.
+    corner_blend_mm      : Blend arc radius at each corner [mm].
+                           Default 10 mm → safe up to ~173 mm/s.
+                           Increase proportionally if raising max_tcp_linear_mms.
 
     Returns
     -------
-    List of [X, Y, Z, W, P, R] waypoints (closed loop — last == first).
+    List of [X, Y, Z, W, P, R] waypoints.  The path is closed (starts and ends
+    at the same point on the blend arc of the first vertex).
 
     ⚠  Keep radius ≤ 50 mm for initial tests.
     """
@@ -655,51 +871,22 @@ def polygon_cartesian_trajectory(
     wpr   = list(center_pose[3:6])
     extra = list(center_pose[6:]) if len(center_pose) > 6 else []
 
-    # Compute vertex positions
-    vertices: List[List[float]] = []
+    # Compute vertex XYZ positions (geometry only — wpr/extra added by _build_blended_path)
+    xyz_vertices: List[List[float]] = []
     for k in range(n_sides):
         angle = math.radians(start_angle_deg) + sign * 2.0 * math.pi * k / n_sides
         dx, dy, dz = _plane_offsets(radius_mm, angle, plane)
-        vertices.append([cx + dx, cy + dy, cz + dz] + wpr + extra)
+        xyz_vertices.append([cx + dx, cy + dy, cz + dz])
 
-    # Compute side lengths and cumulative perimeter distances
-    side_lengths: List[float] = []
-    for k in range(n_sides):
-        v0 = vertices[k]
-        v1 = vertices[(k + 1) % n_sides]
-        side_lengths.append(math.sqrt(sum((v1[i] - v0[i]) ** 2 for i in range(3))))
+    # Build corner-blended dense path (circular arc fillets at every vertex)
+    path_pts, cum_arcs = _build_blended_path(xyz_vertices, corner_blend_mm, wpr, extra)
+    total_arc = cum_arcs[-1]
 
-    cum_dist: List[float] = [0.0]
-    for l in side_lengths:
-        cum_dist.append(cum_dist[-1] + l)
-    total_perimeter = cum_dist[-1]
-
-    # Single quintic profile over the full perimeter (zero vel at start & end)
-    T       = 1.875 * total_perimeter / max_tcp_linear_mms
+    # Single quintic profile over blended perimeter (zero vel at start & end)
+    T       = 1.875 * total_arc / max_tcp_linear_mms
     n_steps = max(4, math.ceil(T / cycle_s))
 
-    waypoints: List[List[float]] = []
-    for step in range(n_steps + 1):          # +1 → last point == first (closed)
-        u = step / n_steps
-        s = 10*u**3 - 15*u**4 + 6*u**5      # quintic: zero vel at both ends
-        d = s * total_perimeter               # arc-length position [mm]
-
-        # Find which side contains arc-length position d
-        seg = n_sides - 1                     # default: last segment
-        for i in range(n_sides):
-            if d <= cum_dist[i + 1] + 1e-9:
-                seg = i
-                break
-
-        t_seg = (d - cum_dist[seg]) / side_lengths[seg] if side_lengths[seg] > 1e-9 else 0.0
-        t_seg = max(0.0, min(1.0, t_seg))
-
-        v0 = vertices[seg]
-        v1 = vertices[(seg + 1) % n_sides]
-        pose = [v0[i] + t_seg * (v1[i] - v0[i]) for i in range(6)]
-        waypoints.append(pose + extra)
-
-    return waypoints
+    return _quintic_sample_path(path_pts, cum_arcs, n_steps)
 
 
 def rectangle_cartesian_trajectory(
@@ -711,18 +898,22 @@ def rectangle_cartesian_trajectory(
     max_tcp_angular_degs: float = 45.0,
     cycle_s:              float = DEFAULT_CYCLE_S,
     clockwise:            bool  = False,
+    corner_blend_mm:      float = 10.0,
 ) -> List[List[float]]:
     """
-    Generate a Cartesian trajectory that traces a rectangle.
+    Generate a Cartesian trajectory that traces a rectangle with circular arc
+    corner blending to eliminate MOTN-721 at 90° corners.
 
-    Uses quintic time-scaling over the total perimeter — the same continuous
-    approach as circle_cartesian_trajectory() and polygon_cartesian_trajectory().
-    The TCP accelerates from zero at the first corner, peaks near the perimeter
-    midpoint, then decelerates back to zero when it returns to the first corner
-    (closed loop).  The robot does NOT stop at intermediate corners.
+    Architecture
+    ------------
+    Same as polygon_cartesian_trajectory(): each sharp 90° corner is replaced
+    by a circular arc of radius *corner_blend_mm*.  A single quintic time-scaling
+    is applied over the blended perimeter so the robot never stops mid-trajectory
+    (avoids MOTN-603 via IBGN flag drop) and peak centripetal acceleration at
+    each corner is bounded by v²/corner_blend_mm (avoids MOTN-721).
 
-    See polygon_cartesian_trajectory() for the rationale: stopping at corners
-    causes MOTN-603 via IBGN flag drop at zero velocity.
+    Safe speed vs corner_blend_mm (a = v²/r, limit ~3000 mm/s²):
+        5  mm → 122 mm/s    10 mm → 173 mm/s    20 mm → 245 mm/s
 
     Args
     ----
@@ -730,14 +921,17 @@ def rectangle_cartesian_trajectory(
     width_mm             : Full width of the rectangle (axis1 of plane) [mm].
     height_mm            : Full height of the rectangle (axis2 of plane) [mm].
     plane                : 'XY', 'XZ', or 'YZ'.
-    max_tcp_linear_mms   : Peak TCP speed [mm/s] (at perimeter midpoint).
+    max_tcp_linear_mms   : Peak TCP speed [mm/s] (at blended perimeter midpoint).
     max_tcp_angular_degs : (unused — WPR held constant).
     cycle_s              : Communication cycle [s] (default 8 ms).
     clockwise            : Traverse corners clockwise if True.
+    corner_blend_mm      : Blend arc radius at each 90° corner [mm].
+                           Default 10 mm → safe up to ~173 mm/s.
 
     Returns
     -------
-    List of [X, Y, Z, W, P, R] waypoints (closed loop — last == first).
+    List of [X, Y, Z, W, P, R] waypoints.  The path is closed (starts and ends
+    at the same point on the blend arc of the first corner).
 
     ⚠  Keep width and height ≤ 100 mm for initial tests.
     """
@@ -763,47 +957,18 @@ def rectangle_cartesian_trajectory(
     if clockwise:
         raw = list(reversed(raw))
 
-    corners = [[cx + dx, cy + dy, cz + dz] + wpr + extra
-               for dx, dy, dz in raw]
+    # XYZ-only corner positions (wpr/extra added by _build_blended_path)
+    xyz_corners = [[cx + dx, cy + dy, cz + dz] for dx, dy, dz in raw]
 
-    # Side lengths and cumulative perimeter
-    n_corners = 4
-    side_lengths: List[float] = []
-    for k in range(n_corners):
-        c0 = corners[k]
-        c1 = corners[(k + 1) % n_corners]
-        side_lengths.append(math.sqrt(sum((c1[i] - c0[i]) ** 2 for i in range(3))))
+    # Build corner-blended dense path (circular arc fillets at every 90° corner)
+    path_pts, cum_arcs = _build_blended_path(xyz_corners, corner_blend_mm, wpr, extra)
+    total_arc = cum_arcs[-1]
 
-    cum_dist: List[float] = [0.0]
-    for l in side_lengths:
-        cum_dist.append(cum_dist[-1] + l)
-    total_perimeter = cum_dist[-1]
-
-    # Single quintic profile over the full perimeter
-    T       = 1.875 * total_perimeter / max_tcp_linear_mms
+    # Single quintic profile over blended perimeter (zero vel at start & end)
+    T       = 1.875 * total_arc / max_tcp_linear_mms
     n_steps = max(4, math.ceil(T / cycle_s))
 
-    waypoints: List[List[float]] = []
-    for step in range(n_steps + 1):
-        u = step / n_steps
-        s = 10*u**3 - 15*u**4 + 6*u**5
-        d = s * total_perimeter
-
-        seg = n_corners - 1
-        for i in range(n_corners):
-            if d <= cum_dist[i + 1] + 1e-9:
-                seg = i
-                break
-
-        t_seg = (d - cum_dist[seg]) / side_lengths[seg] if side_lengths[seg] > 1e-9 else 0.0
-        t_seg = max(0.0, min(1.0, t_seg))
-
-        c0 = corners[seg]
-        c1 = corners[(seg + 1) % n_corners]
-        pose = [c0[i] + t_seg * (c1[i] - c0[i]) for i in range(6)]
-        waypoints.append(pose + extra)
-
-    return waypoints
+    return _quintic_sample_path(path_pts, cum_arcs, n_steps)
 
 
 def pad_to_9(joints: List[float]) -> List[float]:

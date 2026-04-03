@@ -8,12 +8,12 @@ as the centre.  All shapes are drawn in the XY plane (Z constant) by default.
 
 Supported shapes
 ----------------
-  circle     — constant-speed, closed loop
-  square     — 4-sided polygon (regular)
-  rectangle  — width × height, stops at each corner
-  triangle   — 3-sided polygon
-  pentagon   — 5-sided polygon
-  hexagon    — 6-sided polygon
+  circle     — quintic arc-length profile, closed loop
+  square     — 4-sided polygon with corner arc-blending
+  rectangle  — width × height with corner arc-blending
+  triangle   — 3-sided polygon with corner arc-blending
+  pentagon   — 5-sided polygon with corner arc-blending
+  hexagon    — 6-sided polygon with corner arc-blending
   polygon    — any N-sided regular polygon (set N_SIDES below)
 
 Change SHAPE and SIZE_MM below, then run.
@@ -26,8 +26,8 @@ Change SHAPE and SIZE_MM below, then run.
    draws the shape wherever it currently is.
 4. MOTN-156 (config change) fires if the path crosses a singularity.
    Reduce SIZE_MM or choose a different start pose if this happens.
-5. For polygons: the robot stops at each corner (zero velocity).
-   For circles:  the robot moves at constant speed without stopping.
+5. All polygons use corner arc-blending (CORNER_BLEND_MM) to prevent
+   MOTN-721.  The robot does NOT stop at corners.
 
 Prerequisites
 -------------
@@ -57,20 +57,20 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ── Robot / Communication Settings ───────────────────────────────────────────
-ROBOT_IP   = "192.168.56.1"
+ROBOT_IP   = "192.168.72.158"
 ROBOT_PORT = 60015
 
 # ── Shape Selection ───────────────────────────────────────────────────────────
 # Choose one of: "circle", "square", "rectangle", "triangle",
 #                "pentagon", "hexagon", "polygon"
-SHAPE = "circle"
+SHAPE = "square"
 
 # Size:
 #   circle    → radius in mm
 #   square    → circumradius (centre to vertex) in mm
 #   rectangle → (width, height) defined by RECT_WIDTH_MM / RECT_HEIGHT_MM
 #   polygon   → circumradius in mm
-SIZE_MM = 50.0          # Start at 50 mm and raise once confirmed fault-free
+SIZE_MM = 50.0           # Start at 50 mm and raise once confirmed fault-free
 
 # Rectangle dimensions (only used when SHAPE = "rectangle")
 RECT_WIDTH_MM  = 80.0   # mm
@@ -88,6 +88,13 @@ CLOCKWISE = False
 # Speed — defaults to the library's confirmed-safe values
 MAX_LINEAR_MMS   = CRX_CART_LINEAR_MMS    # 150 mm/s
 MAX_ANGULAR_DEGS = CRX_CART_ANGULAR_DEGS  # 45 deg/s
+
+# Corner blend arc radius for polygons and rectangle [mm].
+# Replaces sharp corners with a circular arc, preventing MOTN-721.
+# Safe speed limit ≈ sqrt(3000 × CORNER_BLEND_MM) mm/s.
+#   10 mm → ~173 mm/s    20 mm → ~245 mm/s
+# Increase CORNER_BLEND_MM if raising MAX_LINEAR_MMS above 150 mm/s.
+CORNER_BLEND_MM = 10.0
 
 
 # ── Shape name → polygon sides mapping ───────────────────────────────────────
@@ -124,9 +131,10 @@ def build_trajectory(center_pose):
             max_tcp_linear_mms   = MAX_LINEAR_MMS,
             max_tcp_angular_degs = MAX_ANGULAR_DEGS,
             clockwise            = CLOCKWISE,
+            corner_blend_mm      = CORNER_BLEND_MM,
         )
-        log.info("Shape: RECTANGLE  %.1f × %.1f mm  plane=%s",
-                 RECT_WIDTH_MM, RECT_HEIGHT_MM, PLANE)
+        log.info("Shape: RECTANGLE  %.1f × %.1f mm  plane=%s  blend=%.1f mm",
+                 RECT_WIDTH_MM, RECT_HEIGHT_MM, PLANE, CORNER_BLEND_MM)
 
     elif shape in SHAPE_SIDES:
         n = SHAPE_SIDES[shape]
@@ -138,9 +146,10 @@ def build_trajectory(center_pose):
             max_tcp_linear_mms   = MAX_LINEAR_MMS,
             max_tcp_angular_degs = MAX_ANGULAR_DEGS,
             clockwise            = CLOCKWISE,
+            corner_blend_mm      = CORNER_BLEND_MM,
         )
-        log.info("Shape: %s (%d sides)  radius=%.1f mm  plane=%s",
-                 shape.upper(), n, SIZE_MM, PLANE)
+        log.info("Shape: %s (%d sides)  radius=%.1f mm  plane=%s  blend=%.1f mm",
+                 shape.upper(), n, SIZE_MM, PLANE, CORNER_BLEND_MM)
 
     else:
         raise ValueError(
@@ -249,4 +258,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main
