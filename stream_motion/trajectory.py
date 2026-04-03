@@ -601,15 +601,30 @@ def polygon_cartesian_trajectory(
     """
     Generate a Cartesian trajectory that traces a regular polygon.
 
-    The TCP moves from vertex to vertex using minimum-jerk straight-line
-    segments, decelerating to rest at each corner before continuing.
-    The polygon closes by returning from the last vertex to the first.
+    Uses quintic time-scaling over the total perimeter — the same approach as
+    circle_cartesian_trajectory().  The TCP accelerates from zero at the first
+    vertex, reaches peak speed near the perimeter midpoint, then decelerates
+    back to zero when it returns to the first vertex (closed loop).
+
+    WHY NOT per-segment minimum-jerk (stopping at each corner)?
+    --------------------------------------------------------------------------
+    When each side uses an independent minimum-jerk segment the robot
+    decelerates to zero velocity at every corner.  At zero velocity the
+    FANUC controller drops the IBGN is_waiting_for_command bit, causing
+    Python to detect ``status=0x04`` (SYSRDY only) and abort the stream →
+    MOTN-603 fires mid-trajectory.  The trail-dwell fix at the *end* of the
+    trajectory cannot protect *mid-trajectory* vertex transitions.
+
+    With quintic-perimeter the robot never stops between vertices, so the IBGN
+    flag stays high throughout.  The speed magnitude follows the quintic profile
+    smoothly; only the velocity *direction* changes at each corner (over one
+    8 ms step).  At 150 mm/s this direction change is well within joint limits.
 
     Common use:
+      n_sides=3  → equilateral triangle
       n_sides=4  → square
       n_sides=5  → pentagon
       n_sides=6  → hexagon
-      n_sides=3  → equilateral triangle
 
     Args
     ----
@@ -617,18 +632,16 @@ def polygon_cartesian_trajectory(
     radius_mm            : Circumradius (centre to vertex) [mm].
     n_sides              : Number of sides (≥ 3).
     plane                : 'XY', 'XZ', or 'YZ'.
-    max_tcp_linear_mms   : Max TCP linear speed for each side [mm/s].
-    max_tcp_angular_degs : Max TCP angular speed (unused if WPR is constant).
+    max_tcp_linear_mms   : Peak TCP speed [mm/s] (at perimeter midpoint).
+    max_tcp_angular_degs : (unused — WPR held constant).
     cycle_s              : Communication cycle [s] (default 8 ms).
-    start_angle_deg      : Angle of the first vertex, degrees.
+    start_angle_deg      : Angle of the first vertex [deg].
                            0° → first vertex along +axis1 of the plane.
-                           90° → rotated 90° CCW from that.
-    clockwise            : If True, traverse vertices clockwise.
+    clockwise            : Traverse clockwise if True.
 
     Returns
     -------
-    Concatenated list of minimum-jerk waypoints for all sides.
-    The robot stops (zero velocity) at each vertex.
+    List of [X, Y, Z, W, P, R] waypoints (closed loop — last == first).
 
     ⚠  Keep radius ≤ 50 mm for initial tests.
     """
@@ -649,26 +662,44 @@ def polygon_cartesian_trajectory(
         dx, dy, dz = _plane_offsets(radius_mm, angle, plane)
         vertices.append([cx + dx, cy + dy, cz + dz] + wpr + extra)
 
-    # String together minimum-jerk segments, vertex → vertex (closed loop)
-    all_waypoints: List[List[float]] = []
+    # Compute side lengths and cumulative perimeter distances
+    side_lengths: List[float] = []
     for k in range(n_sides):
-        v_start = vertices[k]
-        v_end   = vertices[(k + 1) % n_sides]
-        segment = minimum_jerk_cartesian_trajectory(
-            start_pose           = v_start,
-            end_pose             = v_end,
-            max_tcp_linear_mms   = max_tcp_linear_mms,
-            max_tcp_angular_degs = max_tcp_angular_degs,
-            cycle_s              = cycle_s,
-        )
-        if k == 0:
-            all_waypoints.extend(segment)
-        else:
-            # Drop the first waypoint of each subsequent segment — it is
-            # identical to the last waypoint of the previous segment.
-            all_waypoints.extend(segment[1:])
+        v0 = vertices[k]
+        v1 = vertices[(k + 1) % n_sides]
+        side_lengths.append(math.sqrt(sum((v1[i] - v0[i]) ** 2 for i in range(3))))
 
-    return all_waypoints
+    cum_dist: List[float] = [0.0]
+    for l in side_lengths:
+        cum_dist.append(cum_dist[-1] + l)
+    total_perimeter = cum_dist[-1]
+
+    # Single quintic profile over the full perimeter (zero vel at start & end)
+    T       = 1.875 * total_perimeter / max_tcp_linear_mms
+    n_steps = max(4, math.ceil(T / cycle_s))
+
+    waypoints: List[List[float]] = []
+    for step in range(n_steps + 1):          # +1 → last point == first (closed)
+        u = step / n_steps
+        s = 10*u**3 - 15*u**4 + 6*u**5      # quintic: zero vel at both ends
+        d = s * total_perimeter               # arc-length position [mm]
+
+        # Find which side contains arc-length position d
+        seg = n_sides - 1                     # default: last segment
+        for i in range(n_sides):
+            if d <= cum_dist[i + 1] + 1e-9:
+                seg = i
+                break
+
+        t_seg = (d - cum_dist[seg]) / side_lengths[seg] if side_lengths[seg] > 1e-9 else 0.0
+        t_seg = max(0.0, min(1.0, t_seg))
+
+        v0 = vertices[seg]
+        v1 = vertices[(seg + 1) % n_sides]
+        pose = [v0[i] + t_seg * (v1[i] - v0[i]) for i in range(6)]
+        waypoints.append(pose + extra)
+
+    return waypoints
 
 
 def rectangle_cartesian_trajectory(
@@ -684,9 +715,14 @@ def rectangle_cartesian_trajectory(
     """
     Generate a Cartesian trajectory that traces a rectangle.
 
-    The four corners are at (±width/2, ±height/2) relative to center_pose,
-    in the specified plane.  The TCP uses minimum-jerk moves between corners
-    and stops (zero velocity) at each one.
+    Uses quintic time-scaling over the total perimeter — the same continuous
+    approach as circle_cartesian_trajectory() and polygon_cartesian_trajectory().
+    The TCP accelerates from zero at the first corner, peaks near the perimeter
+    midpoint, then decelerates back to zero when it returns to the first corner
+    (closed loop).  The robot does NOT stop at intermediate corners.
+
+    See polygon_cartesian_trajectory() for the rationale: stopping at corners
+    causes MOTN-603 via IBGN flag drop at zero velocity.
 
     Args
     ----
@@ -694,14 +730,14 @@ def rectangle_cartesian_trajectory(
     width_mm             : Full width of the rectangle (axis1 of plane) [mm].
     height_mm            : Full height of the rectangle (axis2 of plane) [mm].
     plane                : 'XY', 'XZ', or 'YZ'.
-    max_tcp_linear_mms   : Max TCP linear speed [mm/s].
-    max_tcp_angular_degs : Max TCP angular speed [deg/s].
+    max_tcp_linear_mms   : Peak TCP speed [mm/s] (at perimeter midpoint).
+    max_tcp_angular_degs : (unused — WPR held constant).
     cycle_s              : Communication cycle [s] (default 8 ms).
     clockwise            : Traverse corners clockwise if True.
 
     Returns
     -------
-    Concatenated minimum-jerk waypoints for all four sides.
+    List of [X, Y, Z, W, P, R] waypoints (closed loop — last == first).
 
     ⚠  Keep width and height ≤ 100 mm for initial tests.
     """
@@ -714,7 +750,7 @@ def rectangle_cartesian_trajectory(
 
     hw, hh = width_mm / 2.0, height_mm / 2.0
 
-    # Corner offsets in the chosen plane (CCW order by default)
+    # Corner offsets in the chosen plane (CCW by default)
     if plane == 'XY':
         raw = [(-hw, -hh, 0), ( hw, -hh, 0), ( hw,  hh, 0), (-hw,  hh, 0)]
     elif plane == 'XZ':
@@ -730,21 +766,44 @@ def rectangle_cartesian_trajectory(
     corners = [[cx + dx, cy + dy, cz + dz] + wpr + extra
                for dx, dy, dz in raw]
 
-    all_waypoints: List[List[float]] = []
-    for k in range(4):
-        segment = minimum_jerk_cartesian_trajectory(
-            start_pose           = corners[k],
-            end_pose             = corners[(k + 1) % 4],
-            max_tcp_linear_mms   = max_tcp_linear_mms,
-            max_tcp_angular_degs = max_tcp_angular_degs,
-            cycle_s              = cycle_s,
-        )
-        if k == 0:
-            all_waypoints.extend(segment)
-        else:
-            all_waypoints.extend(segment[1:])
+    # Side lengths and cumulative perimeter
+    n_corners = 4
+    side_lengths: List[float] = []
+    for k in range(n_corners):
+        c0 = corners[k]
+        c1 = corners[(k + 1) % n_corners]
+        side_lengths.append(math.sqrt(sum((c1[i] - c0[i]) ** 2 for i in range(3))))
 
-    return all_waypoints
+    cum_dist: List[float] = [0.0]
+    for l in side_lengths:
+        cum_dist.append(cum_dist[-1] + l)
+    total_perimeter = cum_dist[-1]
+
+    # Single quintic profile over the full perimeter
+    T       = 1.875 * total_perimeter / max_tcp_linear_mms
+    n_steps = max(4, math.ceil(T / cycle_s))
+
+    waypoints: List[List[float]] = []
+    for step in range(n_steps + 1):
+        u = step / n_steps
+        s = 10*u**3 - 15*u**4 + 6*u**5
+        d = s * total_perimeter
+
+        seg = n_corners - 1
+        for i in range(n_corners):
+            if d <= cum_dist[i + 1] + 1e-9:
+                seg = i
+                break
+
+        t_seg = (d - cum_dist[seg]) / side_lengths[seg] if side_lengths[seg] > 1e-9 else 0.0
+        t_seg = max(0.0, min(1.0, t_seg))
+
+        c0 = corners[seg]
+        c1 = corners[(seg + 1) % n_corners]
+        pose = [c0[i] + t_seg * (c1[i] - c0[i]) for i in range(6)]
+        waypoints.append(pose + extra)
+
+    return waypoints
 
 
 def pad_to_9(joints: List[float]) -> List[float]:

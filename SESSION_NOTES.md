@@ -1,5 +1,5 @@
 # Stream Motion Interface — Session Notes
-_Last updated: 2026-04-02_
+_Last updated: 2026-04-03_
 
 ## Project
 - **Repo**: `C:\Users\NIKHIL\PycharmProjects\stream_motion_interface`
@@ -13,18 +13,22 @@ _Last updated: 2026-04-02_
 
 ## Current Status (2026-04-03)
 
-All joint + Cartesian basic scripts and shape tracing confirmed fault-free in ROBOGUIDE.
-Ready to test on real CRX-10iA/L hardware.
+Circle confirmed fault-free. Pentagon faulted (MOTN-603 at waypoint 345) — polygon/rectangle rewritten.
 
 ### Confirmed working
 | Script | Setting | Result |
 |--------|---------|--------|
-| `basic_joint_move.py` — J1 +5° | SCALE=0.50 | Smooth, no alarms |
-| `basic_joint_move_6axis.py` — 6-axis delta | SCALE=0.50 | Smooth, stable |
-| `move_to_home.py` — any → [0,0,0,0,-90,0] | SCALE=0.50 | Smooth, repeatable |
-| `basic_cartesian_move.py` — +200mm X | 150 mm/s | Smooth, 314 waypoints, 2.5s |
-| `shapes_cartesian.py` — circle 50mm R | 150 mm/s | Full circle traced (after MOTN-603 fix) |
-| `shapes_cartesian.py` — square/polygon/rectangle | 150 mm/s | Implementation ready, pending test |
+| `basic_joint_move.py` — J1 +5° | SCALE=0.50 | ✓ Smooth, no alarms |
+| `basic_joint_move_6axis.py` — 6-axis delta | SCALE=0.50 | ✓ Smooth, stable |
+| `move_to_home.py` — any → [0,0,0,0,-90,0] | SCALE=0.50 | ✓ Smooth, repeatable |
+| `basic_cartesian_move.py` — +200mm X | 150 mm/s | ✓ Smooth, 314 waypoints, 2.5s |
+| `shapes_cartesian.py` — circle 50mm R | 150 mm/s | ✓ Full circle, no fault (trail fix) |
+
+### Pending test (after polygon rewrite)
+| Script | Setting | Status |
+|--------|---------|--------|
+| `shapes_cartesian.py` — pentagon 50mm R | 150 mm/s | Rewritten — needs test |
+| `shapes_cartesian.py` — square/hexagon/rectangle | 150 mm/s | Rewritten — needs test |
 
 ### Speed ladder status
 **Joint space**: `0.05 ✓ → 0.50 ✓ → 0.80 (next on real hardware) → 1.00`
@@ -77,6 +81,7 @@ status. The background listener thread fires `_status_event` on each receipt;
 | MOTN-720 (shapes, first run) | Shape's first waypoint is offset from centre by radius → 50mm jump in one 8ms cycle = 6250 mm/s | Added lead-in move in `shapes_cartesian.py`: current_pose → shape_traj[0] |
 | MOTN-721 (circle, second run) | Uniform angular steps in circle → 0→150 mm/s in 8ms = 18,750 mm/s² at lead-in join | Replaced uniform steps with quintic angle profile (zero vel at both ends) |
 | MOTN-603 (circle, third run) | Windows thread wakeup latency (1–15ms) accumulated over 4.5s/571-waypoint circle drains $PKT_STACK=10 buffer | Added 20 trail dwell waypoints (160ms) at end; `last=1` lands on final trail point |
+| MOTN-603 (pentagon, first run) | Per-segment min-jerk polygon stops at each vertex (zero vel). FANUC IBGN drops `is_waiting_for_command` at zero velocity → Python sees `status=0x04`, stops sending → robot fires MOTN-603. Hit at waypoint 345/560 (mid-trajectory, 3rd side). Trail fix can't help mid-trajectory faults. | Rewrote `polygon_cartesian_trajectory` and `rectangle_cartesian_trajectory` to use quintic-perimeter (no stopping at corners), same approach as circle |
 
 ---
 
@@ -98,7 +103,8 @@ Protocol max version reported by robot = 3  (PROTOCOL_VERSION_3 used as default)
 
 | Commit | Message |
 |--------|---------|
-| *pending* | Fix MOTN-603: add 20 trail dwell waypoints at end of shape trajectory |
+| *pending* | Fix MOTN-603 polygon: rewrite polygon+rectangle to quintic-perimeter (no vertex stops) |
+| `295c50c` | Fix MOTN-603 circle: add 20 trail dwell waypoints at end of shape trajectory |
 | `eb737d9` | Fix MOTN-721: use quintic profile for circle (was uniform steps) |
 | `1d1aa5b` | Add shapes_cartesian.py: circle, square, polygon, rectangle, pentagon, hexagon |
 | `39624da` | Raise Cartesian speed to 150 mm/s / 45 deg/s (confirmed safe) |
@@ -109,7 +115,7 @@ Protocol max version reported by robot = 3  (PROTOCOL_VERSION_3 used as default)
 | `773935d` | Raise SCALE from 0.05 to 0.50 across all examples (confirmed working) |
 | `a10ebe3` | Port learnings from stream_motion_gpt: home move, 6-axis, protocol v3 |
 
-**Current HEAD**: `eb737d9` on `main` (before this fix push).
+**Current HEAD**: `295c50c` on `main`.
 
 ---
 
@@ -180,6 +186,35 @@ trajectory = trajectory + [trail_wp] * TRAIL_CYCLES
 
 ---
 
+## MOTN-603 Pentagon Root Cause (2026-04-03)
+
+**Fault**: MOTN-603 fired at waypoint 345/560 (`status=0x04 moving=False`) during pentagon shape.  Robot stopped mid-way through 3rd side (V2→V3).  Python's new improved warning correctly detected the status change and stopped sending.
+
+**Root cause**: The old `polygon_cartesian_trajectory` used **independent minimum-jerk segments per side**, each decelerating to zero velocity at the endpoint vertex.  The FANUC IBGN controller drops the `is_waiting_for_command` bit (bit 0 of status byte) when velocity reaches zero, because it considers the current IBGN streaming "segment" complete.  Python's `_stream_trajectory()` checks:
+
+```python
+if not s.is_waiting_for_command and not s.is_command_received:
+    return False   # ← triggered here with status=0x04
+```
+
+When this fired, Python stopped sending.  The robot's buffer drained and MOTN-603 fired.  This happened mid-trajectory — the trail-dwell fix at the *end* of the trajectory is irrelevant here.
+
+**Fix**: Rewrote both `polygon_cartesian_trajectory` and `rectangle_cartesian_trajectory` to use **quintic time-scaling over total perimeter** (same as `circle_cartesian_trajectory`).  The robot never reaches zero velocity between corners, so IBGN stays active throughout.
+
+- Speed magnitude: smooth quintic (0 → peak → 0 over full perimeter)
+- Velocity direction: changes over one 8 ms step at each corner (sharp corner in Cartesian space)
+- Risk: MOTN-721 at corners if speed too high → reduce `MAX_LINEAR_MMS` if needed
+- 150 mm/s tested on circle (smooth corners) — should be fine for 90° and 72° corners at this speed
+
+**Waypoint counts after rewrite** (50 mm radius, 150 mm/s):
+```
+Pentagon (5×R=50): perimeter = 5 × 2×50×sin(36°) = 294 mm → T=3.68s → 461 waypoints
+Square   (4×R=50): perimeter = 4 × 50√2 = 283 mm         → T=3.54s → 443 waypoints
+Hexagon  (6×R=50): perimeter = 6 × 50   = 300 mm          → T=3.75s → 469 waypoints
+```
+
+---
+
 ## Next Steps (real hardware)
 
 1. **Push latest** (from PowerShell):
@@ -188,11 +223,13 @@ trajectory = trajectory + [trail_wp] * TRAIL_CYCLES
    git push
    ```
 
-2. **Test circle again** in ROBOGUIDE — confirm no MOTN-603 with trail fix
+2. **Test pentagon** in ROBOGUIDE — confirm MOTN-603 is gone with quintic-perimeter approach
 
-3. **Test other shapes**: square, rectangle, pentagon, hexagon, triangle
+3. **Watch for MOTN-721** at corners if speed is too high (reduce `MAX_LINEAR_MMS` if needed)
 
-4. **Real-robot tests** at current settings (SCALE=0.50 joint, 150 mm/s Cartesian)
+4. **Test all shapes**: square, rectangle, hexagon, triangle
+
+5. **Real-robot tests** at current settings (SCALE=0.50 joint, 150 mm/s Cartesian)
 
 5. **Speed ladders** once confirmed fault-free on real hardware:
    - Joint: SCALE 0.80 → 1.00
