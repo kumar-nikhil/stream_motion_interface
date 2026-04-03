@@ -203,12 +203,29 @@ def main() -> None:
         # Concatenate: lead-in (drop last point) + shape (avoids duplicate)
         trajectory = lead_in[:-1] + shape_traj
 
-        T_lead = (len(lead_in) - 1) * 0.008
+        # ── Trail: dwell waypoints to prevent MOTN-603 at end ────────────────
+        # Root cause: Python (Windows) thread wakeup latency (~1–15 ms) can
+        # delay the main loop by a full 8 ms cycle.  Over a long trajectory
+        # (circle ≈ 570 waypoints / 4.5 s) this occasionally drains the
+        # robot's $PKT_STACK=10 command buffer → MOTN-603.
+        # Fix: append TRAIL_CYCLES copies of the final position so that
+        # last=1 lands on a stationary waypoint well after real motion ends.
+        # This gives the buffer ~160 ms of slack — enough to absorb 2 missed
+        # cycles with generous margin.  The robot holds its final position
+        # during the trail and only exits IBGN when last=1 is received.
+        TRAIL_CYCLES = 20
+        trail_wp = list(trajectory[-1])
+        trajectory = trajectory + [trail_wp] * TRAIL_CYCLES
+
+        T_lead  = (len(lead_in) - 1) * 0.008
         T_shape = (len(shape_traj) - 1) * 0.008
+        T_trail = TRAIL_CYCLES * 0.008
         T_total = (len(trajectory) - 1) * 0.008
         log.info("Lead-in:  %d waypoints  T=%.2f s  (current → first vertex)",
                  len(lead_in), T_lead)
         log.info("Shape:    %d waypoints  T=%.2f s", len(shape_traj), T_shape)
+        log.info("Trail:    %d waypoints  T=%.2f s  (dwell, MOTN-603 guard)",
+                 TRAIL_CYCLES, T_trail)
         log.info("Total:    %d waypoints  T=%.2f s", len(trajectory), T_total)
 
         if trajectory:
@@ -217,7 +234,7 @@ def main() -> None:
             log.info("From:   X=%.3f  Y=%.3f  Z=%.3f  (current pose)", *p0[:3])
             log.info("Start:  X=%.3f  Y=%.3f  Z=%.3f  (first vertex)", *ps[:3])
 
-        log.info("Streaming %d waypoints (lead-in + shape)...", len(trajectory))
+        log.info("Streaming %d waypoints (lead-in + shape + trail)...", len(trajectory))
         success = client.stream_cartesian_trajectory(trajectory)
 
         if success:

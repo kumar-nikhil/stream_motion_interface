@@ -304,7 +304,11 @@ class StreamMotionClient:
                 return False
 
             if not s.is_waiting_for_command and not s.is_command_received:
-                logger.warning("Robot stopped waiting for commands at waypoint %d", idx)
+                logger.warning(
+                    "Robot stopped waiting for commands at waypoint %d/%d "
+                    "(status=0x%02X moving=%s) — check pendant for faults",
+                    idx, total, s.status, s.is_moving,
+                )
                 return False
 
             # First packet: mirror the status seq; subsequent packets: increment own counter

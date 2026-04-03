@@ -11,9 +11,9 @@ _Last updated: 2026-04-02_
 
 ---
 
-## Current Status (2026-04-02)
+## Current Status (2026-04-03)
 
-All four example scripts run fault-free in ROBOGUIDE at current speed settings.
+All joint + Cartesian basic scripts and shape tracing confirmed fault-free in ROBOGUIDE.
 Ready to test on real CRX-10iA/L hardware.
 
 ### Confirmed working
@@ -23,6 +23,8 @@ Ready to test on real CRX-10iA/L hardware.
 | `basic_joint_move_6axis.py` — 6-axis delta | SCALE=0.50 | Smooth, stable |
 | `move_to_home.py` — any → [0,0,0,0,-90,0] | SCALE=0.50 | Smooth, repeatable |
 | `basic_cartesian_move.py` — +200mm X | 150 mm/s | Smooth, 314 waypoints, 2.5s |
+| `shapes_cartesian.py` — circle 50mm R | 150 mm/s | Full circle traced (after MOTN-603 fix) |
+| `shapes_cartesian.py` — square/polygon/rectangle | 150 mm/s | Implementation ready, pending test |
 
 ### Speed ladder status
 **Joint space**: `0.05 ✓ → 0.50 ✓ → 0.80 (next on real hardware) → 1.00`
@@ -72,6 +74,9 @@ status. The background listener thread fires `_status_event` on each receipt;
 | MOTN-722 | Box filter on quadratic profile → step[1] jumped 0.030°, jerk=101,875 deg/s³ (82× limit) | Replaced trapezoidal+boxfilter with `minimum_jerk_trajectory` |
 | SYST-323 | J2=86° at SCALE=0.50 → peak TCP ~1307 mm/s >> 750 mm/s | Added `max_tcp_speed_mms` lever-arm constraint to joint planner |
 | MOTN-721 (Cartesian) | 500 mm/s → only 11 waypoints for 20mm → IK produced excessive J2 acceleration at waypoint 3 | Reduced to 50 mm/s initially, then confirmed 150 mm/s safe |
+| MOTN-720 (shapes, first run) | Shape's first waypoint is offset from centre by radius → 50mm jump in one 8ms cycle = 6250 mm/s | Added lead-in move in `shapes_cartesian.py`: current_pose → shape_traj[0] |
+| MOTN-721 (circle, second run) | Uniform angular steps in circle → 0→150 mm/s in 8ms = 18,750 mm/s² at lead-in join | Replaced uniform steps with quintic angle profile (zero vel at both ends) |
+| MOTN-603 (circle, third run) | Windows thread wakeup latency (1–15ms) accumulated over 4.5s/571-waypoint circle drains $PKT_STACK=10 buffer | Added 20 trail dwell waypoints (160ms) at end; `last=1` lands on final trail point |
 
 ---
 
@@ -93,6 +98,9 @@ Protocol max version reported by robot = 3  (PROTOCOL_VERSION_3 used as default)
 
 | Commit | Message |
 |--------|---------|
+| *pending* | Fix MOTN-603: add 20 trail dwell waypoints at end of shape trajectory |
+| `eb737d9` | Fix MOTN-721: use quintic profile for circle (was uniform steps) |
+| `1d1aa5b` | Add shapes_cartesian.py: circle, square, polygon, rectangle, pentagon, hexagon |
 | `39624da` | Raise Cartesian speed to 150 mm/s / 45 deg/s (confirmed safe) |
 | `e6109f9` | Lower Cartesian speed defaults to fix MOTN-721 |
 | `cdc77c1` | Add Cartesian streaming: minimum_jerk_cartesian_trajectory + example |
@@ -101,7 +109,7 @@ Protocol max version reported by robot = 3  (PROTOCOL_VERSION_3 used as default)
 | `773935d` | Raise SCALE from 0.05 to 0.50 across all examples (confirmed working) |
 | `a10ebe3` | Port learnings from stream_motion_gpt: home move, 6-axis, protocol v3 |
 
-**Current HEAD**: `39624da` on `main`.
+**Current HEAD**: `eb737d9` on `main` (before this fix push).
 
 ---
 
@@ -152,6 +160,26 @@ n_steps = ceil(T / cycle_s)   ← ceil, not round, to guarantee speed ≤ limit
 
 ---
 
+## MOTN-603 Root Cause and Fix (2026-04-03)
+
+**Fault**: MOTN-603 "Receiving interval over" fired near end of circle trajectory (robot stopped 0.7mm short of closing).
+
+**Root cause**: Python running on Windows. Windows thread scheduler wakeup latency is 1–15ms. The main send loop wakes on `_status_event` but Python's GIL + OS scheduler can delay wakeup by a full 8ms cycle. Over a long trajectory (circle = 571 waypoints, 4.57s) these jitter events accumulate and occasionally drain the robot's $PKT_STACK=10 command buffer. The shorter basic_cartesian_move (314 waypoints, 2.51s) never triggered this because there wasn't enough time for drift to accumulate.
+
+**Evidence**: Python logged "Trajectory complete" (all 571 packets sent) while robot already stopped at Y=-149.344 (0.7mm before target Y=-150.0). This means MOTN-603 fired mid-trajectory; robot halted; Python continued sending to a faulted robot (status bits lagged clearing); Python eventually finished and returned True.
+
+**Fix applied** (`shapes_cartesian.py`):
+```python
+TRAIL_CYCLES = 20   # 20 × 8ms = 160ms dwell
+trail_wp = list(trajectory[-1])
+trajectory = trajectory + [trail_wp] * TRAIL_CYCLES
+```
+`last=1` now lands on the 20th trail waypoint, 160ms after real motion ends. The robot holds its final position during the trail. Even if Python falls 2 cycles behind at the very end, it has 20 slots of slack before `last=1` is reached.
+
+**Why 20 cycles**: $PKT_STACK=10 cycles minimum; Windows jitter can stack 2 missed cycles → 20 gives 2× safety margin.
+
+---
+
 ## Next Steps (real hardware)
 
 1. **Push latest** (from PowerShell):
@@ -160,14 +188,18 @@ n_steps = ceil(T / cycle_s)   ← ceil, not round, to guarantee speed ≤ limit
    git push
    ```
 
-2. **Real-robot tests** at current settings (SCALE=0.50 joint, 150 mm/s Cartesian)
+2. **Test circle again** in ROBOGUIDE — confirm no MOTN-603 with trail fix
 
-3. **Speed ladders** once confirmed fault-free on real hardware:
+3. **Test other shapes**: square, rectangle, pentagon, hexagon, triangle
+
+4. **Real-robot tests** at current settings (SCALE=0.50 joint, 150 mm/s Cartesian)
+
+5. **Speed ladders** once confirmed fault-free on real hardware:
    - Joint: SCALE 0.80 → 1.00
    - Cartesian: 200 → 250 → 300 mm/s
    - Faults to watch: MOTN-609/610/611 (joint), SYST-323 (TCP), MOTN-721 (Cartesian IK)
 
-4. **Future features**:
+6. **Future features**:
    - Live limit table query via `PKT_TYPE_LIMIT_REQUEST` (auto-configure limits)
    - I/O in command packets (gripper synchronisation)
    - Multi-segment streaming (A→B→C without stopping)
