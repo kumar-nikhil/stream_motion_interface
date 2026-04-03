@@ -499,6 +499,244 @@ def minimum_jerk_cartesian_trajectory(
     return waypoints
 
 
+def _plane_offsets(
+    radius_mm: float,
+    angle_rad: float,
+    plane: str,
+) -> Tuple[float, float, float]:
+    """Return (dx, dy, dz) for a point on a circle of given radius at angle_rad,
+    lying in the specified plane ('XY', 'XZ', or 'YZ')."""
+    c = radius_mm * math.cos(angle_rad)
+    s = radius_mm * math.sin(angle_rad)
+    if plane == 'XY':
+        return c, s, 0.0
+    elif plane == 'XZ':
+        return c, 0.0, s
+    elif plane == 'YZ':
+        return 0.0, c, s
+    else:
+        raise ValueError(f"plane must be 'XY', 'XZ', or 'YZ', got {plane!r}")
+
+
+def circle_cartesian_trajectory(
+    center_pose:        List[float],
+    radius_mm:          float,
+    plane:              str   = 'XY',
+    max_tcp_linear_mms: float = 150.0,
+    cycle_s:            float = DEFAULT_CYCLE_S,
+    clockwise:          bool  = False,
+) -> List[List[float]]:
+    """
+    Generate a constant-speed Cartesian circle trajectory.
+
+    The TCP moves at a steady speed of max_tcp_linear_mms around the full
+    360° circle and returns to the start point.  Orientation (WPR) is held
+    constant throughout.
+
+    Unlike polygon or line moves, the circle does NOT use the quintic
+    ramp — instead it uses uniform angular steps so that TCP speed is
+    constant everywhere on the arc.  The first and last waypoints coincide
+    (closed loop).
+
+    Args
+    ----
+    center_pose        : [X, Y, Z, W, P, R] — centre of the circle plus
+                         the orientation to hold throughout [mm / deg].
+    radius_mm          : Circle radius [mm].
+    plane              : Plane in which the circle lies: 'XY', 'XZ', 'YZ'.
+                         Default 'XY' (Z is the out-of-plane axis).
+    max_tcp_linear_mms : Constant TCP speed [mm/s].
+    cycle_s            : Communication cycle [s] (default 8 ms).
+    clockwise          : If True, traverse clockwise (negative angle direction).
+
+    Returns
+    -------
+    List of [X, Y, Z, W, P, R] waypoints (closed loop — last == first).
+
+    ⚠  Keep radius ≤ 50 mm for initial tests to stay within a safe
+    workspace region and avoid MOTN-156 (configuration change).
+    """
+    if radius_mm <= 0:
+        raise ValueError("radius_mm must be positive")
+
+    circumference  = 2.0 * math.pi * radius_mm
+    arc_step_mm    = max_tcp_linear_mms * cycle_s          # mm per cycle
+    n_steps        = max(4, math.ceil(circumference / arc_step_mm))
+
+    sign = -1.0 if clockwise else 1.0
+    cx, cy, cz = center_pose[0], center_pose[1], center_pose[2]
+    wpr = list(center_pose[3:6])
+    extra = list(center_pose[6:]) if len(center_pose) > 6 else []
+
+    waypoints: List[List[float]] = []
+    for k in range(n_steps + 1):            # +1 so last point == first
+        angle = sign * 2.0 * math.pi * k / n_steps
+        dx, dy, dz = _plane_offsets(radius_mm, angle, plane)
+        waypoints.append([cx + dx, cy + dy, cz + dz] + wpr + extra)
+
+    return waypoints
+
+
+def polygon_cartesian_trajectory(
+    center_pose:          List[float],
+    radius_mm:            float,
+    n_sides:              int,
+    plane:                str   = 'XY',
+    max_tcp_linear_mms:   float = 150.0,
+    max_tcp_angular_degs: float = 45.0,
+    cycle_s:              float = DEFAULT_CYCLE_S,
+    start_angle_deg:      float = 0.0,
+    clockwise:            bool  = False,
+) -> List[List[float]]:
+    """
+    Generate a Cartesian trajectory that traces a regular polygon.
+
+    The TCP moves from vertex to vertex using minimum-jerk straight-line
+    segments, decelerating to rest at each corner before continuing.
+    The polygon closes by returning from the last vertex to the first.
+
+    Common use:
+      n_sides=4  → square
+      n_sides=5  → pentagon
+      n_sides=6  → hexagon
+      n_sides=3  → equilateral triangle
+
+    Args
+    ----
+    center_pose          : [X, Y, Z, W, P, R] — centre + orientation [mm/deg].
+    radius_mm            : Circumradius (centre to vertex) [mm].
+    n_sides              : Number of sides (≥ 3).
+    plane                : 'XY', 'XZ', or 'YZ'.
+    max_tcp_linear_mms   : Max TCP linear speed for each side [mm/s].
+    max_tcp_angular_degs : Max TCP angular speed (unused if WPR is constant).
+    cycle_s              : Communication cycle [s] (default 8 ms).
+    start_angle_deg      : Angle of the first vertex, degrees.
+                           0° → first vertex along +axis1 of the plane.
+                           90° → rotated 90° CCW from that.
+    clockwise            : If True, traverse vertices clockwise.
+
+    Returns
+    -------
+    Concatenated list of minimum-jerk waypoints for all sides.
+    The robot stops (zero velocity) at each vertex.
+
+    ⚠  Keep radius ≤ 50 mm for initial tests.
+    """
+    if n_sides < 3:
+        raise ValueError("n_sides must be ≥ 3")
+    if radius_mm <= 0:
+        raise ValueError("radius_mm must be positive")
+
+    sign = -1.0 if clockwise else 1.0
+    cx, cy, cz = center_pose[0], center_pose[1], center_pose[2]
+    wpr   = list(center_pose[3:6])
+    extra = list(center_pose[6:]) if len(center_pose) > 6 else []
+
+    # Compute vertex positions
+    vertices: List[List[float]] = []
+    for k in range(n_sides):
+        angle = math.radians(start_angle_deg) + sign * 2.0 * math.pi * k / n_sides
+        dx, dy, dz = _plane_offsets(radius_mm, angle, plane)
+        vertices.append([cx + dx, cy + dy, cz + dz] + wpr + extra)
+
+    # String together minimum-jerk segments, vertex → vertex (closed loop)
+    all_waypoints: List[List[float]] = []
+    for k in range(n_sides):
+        v_start = vertices[k]
+        v_end   = vertices[(k + 1) % n_sides]
+        segment = minimum_jerk_cartesian_trajectory(
+            start_pose           = v_start,
+            end_pose             = v_end,
+            max_tcp_linear_mms   = max_tcp_linear_mms,
+            max_tcp_angular_degs = max_tcp_angular_degs,
+            cycle_s              = cycle_s,
+        )
+        if k == 0:
+            all_waypoints.extend(segment)
+        else:
+            # Drop the first waypoint of each subsequent segment — it is
+            # identical to the last waypoint of the previous segment.
+            all_waypoints.extend(segment[1:])
+
+    return all_waypoints
+
+
+def rectangle_cartesian_trajectory(
+    center_pose:          List[float],
+    width_mm:             float,
+    height_mm:            float,
+    plane:                str   = 'XY',
+    max_tcp_linear_mms:   float = 150.0,
+    max_tcp_angular_degs: float = 45.0,
+    cycle_s:              float = DEFAULT_CYCLE_S,
+    clockwise:            bool  = False,
+) -> List[List[float]]:
+    """
+    Generate a Cartesian trajectory that traces a rectangle.
+
+    The four corners are at (±width/2, ±height/2) relative to center_pose,
+    in the specified plane.  The TCP uses minimum-jerk moves between corners
+    and stops (zero velocity) at each one.
+
+    Args
+    ----
+    center_pose          : [X, Y, Z, W, P, R] — centre + orientation [mm/deg].
+    width_mm             : Full width of the rectangle (axis1 of plane) [mm].
+    height_mm            : Full height of the rectangle (axis2 of plane) [mm].
+    plane                : 'XY', 'XZ', or 'YZ'.
+    max_tcp_linear_mms   : Max TCP linear speed [mm/s].
+    max_tcp_angular_degs : Max TCP angular speed [deg/s].
+    cycle_s              : Communication cycle [s] (default 8 ms).
+    clockwise            : Traverse corners clockwise if True.
+
+    Returns
+    -------
+    Concatenated minimum-jerk waypoints for all four sides.
+
+    ⚠  Keep width and height ≤ 100 mm for initial tests.
+    """
+    if width_mm <= 0 or height_mm <= 0:
+        raise ValueError("width_mm and height_mm must be positive")
+
+    cx, cy, cz = center_pose[0], center_pose[1], center_pose[2]
+    wpr   = list(center_pose[3:6])
+    extra = list(center_pose[6:]) if len(center_pose) > 6 else []
+
+    hw, hh = width_mm / 2.0, height_mm / 2.0
+
+    # Corner offsets in the chosen plane (CCW order by default)
+    if plane == 'XY':
+        raw = [(-hw, -hh, 0), ( hw, -hh, 0), ( hw,  hh, 0), (-hw,  hh, 0)]
+    elif plane == 'XZ':
+        raw = [(-hw, 0, -hh), ( hw, 0, -hh), ( hw, 0,  hh), (-hw, 0,  hh)]
+    elif plane == 'YZ':
+        raw = [(0, -hw, -hh), (0,  hw, -hh), (0,  hw,  hh), (0, -hw,  hh)]
+    else:
+        raise ValueError(f"plane must be 'XY', 'XZ', or 'YZ', got {plane!r}")
+
+    if clockwise:
+        raw = list(reversed(raw))
+
+    corners = [[cx + dx, cy + dy, cz + dz] + wpr + extra
+               for dx, dy, dz in raw]
+
+    all_waypoints: List[List[float]] = []
+    for k in range(4):
+        segment = minimum_jerk_cartesian_trajectory(
+            start_pose           = corners[k],
+            end_pose             = corners[(k + 1) % 4],
+            max_tcp_linear_mms   = max_tcp_linear_mms,
+            max_tcp_angular_degs = max_tcp_angular_degs,
+            cycle_s              = cycle_s,
+        )
+        if k == 0:
+            all_waypoints.extend(segment)
+        else:
+            all_waypoints.extend(segment[1:])
+
+    return all_waypoints
+
+
 def pad_to_9(joints: List[float]) -> List[float]:
     """Pad a joint list to 9 elements (required by command packets)."""
     return (list(joints) + [0.0] * 9)[:9]
