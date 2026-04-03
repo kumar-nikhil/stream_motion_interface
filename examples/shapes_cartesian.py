@@ -93,10 +93,15 @@ MAX_ANGULAR_DEGS = CRX_CART_ANGULAR_DEGS  # 45 deg/s
 # Each sharp corner is replaced by a quintic Bézier curve (C2-continuous)
 # whose curvature starts and ends at zero — no jerk spike at the join.
 # Larger values round corners more but allow higher speed / sharper angles.
-#   10 mm → safe for hexagon/pentagon/square at 150 mm/s
-#   20 mm → safe for ALL shapes including triangle at 150 mm/s  ← default
-#   30 mm → comfortable margin for aggressive speed tests
-CORNER_BLEND_MM = 20.0
+#
+# Measured J2 jerk at 150 mm/s with Bézier (limit = 1240 deg/s³):
+#   blend=10 mm: pentagon 82, square 235, hexagon 40, rectangle 253  → all ✓
+#   blend=10 mm: triangle 2745  → ✗  (use blend=20 or reduce speed for triangle)
+#   blend=20 mm: triangle 983   → ✓
+#
+# At R=50mm, blend=10mm eats 25% of each pentagon side → visible corners.
+# blend=20mm eats 49% → looks nearly circular.  Use 10 as default.
+CORNER_BLEND_MM = 10.0
 
 
 # ── Shape name → polygon sides mapping ───────────────────────────────────────
@@ -140,6 +145,9 @@ def build_trajectory(center_pose):
 
     elif shape in SHAPE_SIDES:
         n = SHAPE_SIDES[shape]
+        # Triangle (120° corners) needs larger blend to stay within J2 jerk limit.
+        # Auto-scale: triangle → 2× blend, others keep CORNER_BLEND_MM as-is.
+        blend = CORNER_BLEND_MM * 2.0 if n == 3 else CORNER_BLEND_MM
         traj = polygon_cartesian_trajectory(
             center_pose          = center_pose,
             radius_mm            = SIZE_MM,
@@ -148,10 +156,10 @@ def build_trajectory(center_pose):
             max_tcp_linear_mms   = MAX_LINEAR_MMS,
             max_tcp_angular_degs = MAX_ANGULAR_DEGS,
             clockwise            = CLOCKWISE,
-            corner_blend_mm      = CORNER_BLEND_MM,
+            corner_blend_mm      = blend,
         )
         log.info("Shape: %s (%d sides)  radius=%.1f mm  plane=%s  blend=%.1f mm",
-                 shape.upper(), n, SIZE_MM, PLANE, CORNER_BLEND_MM)
+                 shape.upper(), n, SIZE_MM, PLANE, blend)
 
     else:
         raise ValueError(
