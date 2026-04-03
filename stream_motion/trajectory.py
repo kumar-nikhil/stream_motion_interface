@@ -527,50 +527,60 @@ def circle_cartesian_trajectory(
     clockwise:          bool  = False,
 ) -> List[List[float]]:
     """
-    Generate a constant-speed Cartesian circle trajectory.
+    Generate a minimum-jerk Cartesian circle trajectory.
 
-    The TCP moves at a steady speed of max_tcp_linear_mms around the full
-    360° circle and returns to the start point.  Orientation (WPR) is held
-    constant throughout.
+    The quintic time-scaling (10s³−15s⁴+6s⁵) is applied to the angle
+    parameter so angular velocity (and thus TCP speed) ramps smoothly
+    from zero at the start, peaks at the midpoint, then decelerates back
+    to zero at the end.  This gives:
 
-    Unlike polygon or line moves, the circle does NOT use the quintic
-    ramp — instead it uses uniform angular steps so that TCP speed is
-    constant everywhere on the arc.  The first and last waypoints coincide
-    (closed loop).
+      - Zero TCP velocity at start and end — safe to join directly with a
+        minimum-jerk lead-in or any other move that ends at rest.
+      - Peak TCP speed = 1.875 × circumference / T ≤ max_tcp_linear_mms.
+      - T = ceil(1.875 × 2π × radius / max_tcp_linear_mms / cycle_s) × cycle_s
+
+    WHY NOT constant-speed (uniform angular steps)?
+    A constant-speed circle requires instantaneous acceleration from 0 to
+    max_tcp_linear_mms at the first step, causing MOTN-721 whenever a
+    lead-in (or any other zero-velocity move) precedes the circle.
+
+    The first and last waypoints coincide (closed loop).
+    Orientation (WPR) is held constant throughout.
 
     Args
     ----
-    center_pose        : [X, Y, Z, W, P, R] — centre of the circle plus
-                         the orientation to hold throughout [mm / deg].
+    center_pose        : [X, Y, Z, W, P, R] — centre + orientation [mm/deg].
     radius_mm          : Circle radius [mm].
-    plane              : Plane in which the circle lies: 'XY', 'XZ', 'YZ'.
-                         Default 'XY' (Z is the out-of-plane axis).
-    max_tcp_linear_mms : Constant TCP speed [mm/s].
+    plane              : 'XY', 'XZ', or 'YZ'. Default 'XY'.
+    max_tcp_linear_mms : Peak TCP speed [mm/s] (at the midpoint of the arc).
     cycle_s            : Communication cycle [s] (default 8 ms).
-    clockwise          : If True, traverse clockwise (negative angle direction).
+    clockwise          : Traverse clockwise if True.
 
     Returns
     -------
     List of [X, Y, Z, W, P, R] waypoints (closed loop — last == first).
 
-    ⚠  Keep radius ≤ 50 mm for initial tests to stay within a safe
-    workspace region and avoid MOTN-156 (configuration change).
+    ⚠  Keep radius ≤ 50 mm for initial tests.
     """
     if radius_mm <= 0:
         raise ValueError("radius_mm must be positive")
 
-    circumference  = 2.0 * math.pi * radius_mm
-    arc_step_mm    = max_tcp_linear_mms * cycle_s          # mm per cycle
-    n_steps        = max(4, math.ceil(circumference / arc_step_mm))
+    circumference = 2.0 * math.pi * radius_mm
+    # Same duration formula as minimum_jerk_cartesian_trajectory for a
+    # straight-line move of length = circumference.
+    T       = 1.875 * circumference / max_tcp_linear_mms
+    n_steps = max(4, math.ceil(T / cycle_s))
 
     sign = -1.0 if clockwise else 1.0
     cx, cy, cz = center_pose[0], center_pose[1], center_pose[2]
-    wpr = list(center_pose[3:6])
+    wpr   = list(center_pose[3:6])
     extra = list(center_pose[6:]) if len(center_pose) > 6 else []
 
     waypoints: List[List[float]] = []
     for k in range(n_steps + 1):            # +1 so last point == first
-        angle = sign * 2.0 * math.pi * k / n_steps
+        u     = k / n_steps                 # normalised time [0..1]
+        s     = 10*u**3 - 15*u**4 + 6*u**5 # quintic: 0→1, zero vel at endpoints
+        angle = sign * 2.0 * math.pi * s
         dx, dy, dz = _plane_offsets(radius_mm, angle, plane)
         waypoints.append([cx + dx, cy + dy, cz + dz] + wpr + extra)
 
