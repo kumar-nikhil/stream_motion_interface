@@ -94,14 +94,13 @@ MAX_ANGULAR_DEGS = CRX_CART_ANGULAR_DEGS  # 45 deg/s
 # whose curvature starts and ends at zero — no jerk spike at the join.
 # Larger values round corners more but allow higher speed / sharper angles.
 #
-# Measured J2 jerk at 150 mm/s with Bézier (limit = 1240 deg/s³):
-#   blend=10 mm: pentagon 82, square 235, hexagon 40, rectangle 253  → all ✓
-#   blend=10 mm: triangle 2745  → ✗  (use blend=20 or reduce speed for triangle)
-#   blend=20 mm: triangle 983   → ✓
+# ROBOGUIDE results at 150 mm/s, R=50mm pentagon:
+#   blend=10 mm: MOTN-722 (jerk too high at extended robot config)
+#   blend=20 mm: passes but looks circular (49% of each side consumed)
+#   blend=15 mm: 37% consumed → 63% straight → visible pentagonal corners
 #
-# At R=50mm, blend=10mm eats 25% of each pentagon side → visible corners.
-# blend=20mm eats 49% → looks nearly circular.  Use 10 as default.
-CORNER_BLEND_MM = 10.0
+# Triangle auto-scales to 2× blend (see below).
+CORNER_BLEND_MM = 15.0
 
 
 # ── Shape name → polygon sides mapping ───────────────────────────────────────
