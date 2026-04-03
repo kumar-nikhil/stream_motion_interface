@@ -39,6 +39,7 @@ import logging
 
 from stream_motion import (
     StreamMotionClient,
+    minimum_jerk_cartesian_trajectory,
     circle_cartesian_trajectory,
     polygon_cartesian_trajectory,
     rectangle_cartesian_trajectory,
@@ -180,23 +181,43 @@ def main() -> None:
 
         # Build trajectory for selected shape
         try:
-            trajectory = build_trajectory(center_pose)
+            shape_traj = build_trajectory(center_pose)
         except ValueError as exc:
             log.error("%s", exc)
             client.stop_status_output()
             return
 
-        T = (len(trajectory) - 1) * 0.008
-        log.info("Trajectory: %d waypoints  T=%.2f s", len(trajectory), T)
+        # ── Lead-in move: current position → first shape waypoint ────────────
+        # The shape's first waypoint is offset from center by the radius/corner
+        # distance.  Without a lead-in the very first command packet would ask
+        # the robot to jump that full distance in one 8 ms cycle → MOTN-720.
+        # We smoothly move to the start point first, then trace the shape.
+        shape_start = shape_traj[0]
+        lead_in = minimum_jerk_cartesian_trajectory(
+            start_pose           = center_pose,
+            end_pose             = shape_start,
+            max_tcp_linear_mms   = MAX_LINEAR_MMS,
+            max_tcp_angular_degs = MAX_ANGULAR_DEGS,
+        )
 
-        # Log first vertex (start point) and a midpoint for sanity check
+        # Concatenate: lead-in (drop last point) + shape (avoids duplicate)
+        trajectory = lead_in[:-1] + shape_traj
+
+        T_lead = (len(lead_in) - 1) * 0.008
+        T_shape = (len(shape_traj) - 1) * 0.008
+        T_total = (len(trajectory) - 1) * 0.008
+        log.info("Lead-in:  %d waypoints  T=%.2f s  (current → first vertex)",
+                 len(lead_in), T_lead)
+        log.info("Shape:    %d waypoints  T=%.2f s", len(shape_traj), T_shape)
+        log.info("Total:    %d waypoints  T=%.2f s", len(trajectory), T_total)
+
         if trajectory:
             p0 = trajectory[0]
-            pm = trajectory[len(trajectory) // 4]
-            log.info("Start:  X=%.3f  Y=%.3f  Z=%.3f", p0[0], p0[1], p0[2])
-            log.info("1/4pt:  X=%.3f  Y=%.3f  Z=%.3f", pm[0], pm[1], pm[2])
+            ps = shape_traj[0]
+            log.info("From:   X=%.3f  Y=%.3f  Z=%.3f  (current pose)", *p0[:3])
+            log.info("Start:  X=%.3f  Y=%.3f  Z=%.3f  (first vertex)", *ps[:3])
 
-        log.info("Streaming %d waypoints...", len(trajectory))
+        log.info("Streaming %d waypoints (lead-in + shape)...", len(trajectory))
         success = client.stream_cartesian_trajectory(trajectory)
 
         if success:
