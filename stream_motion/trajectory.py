@@ -506,19 +506,36 @@ def _build_blended_path(
     extra:          List[float],         # extended axes (held constant)
 ) -> Tuple[List[List[float]], List[float]]:
     """
-    Build a corner-blended closed polygon path with circular arc fillets.
+    Build a C2-continuous corner-blended closed polygon path.
 
-    At each corner the sharp turn is replaced by a circular arc of *blend_radius*.
-    This caps the centripetal acceleration at  v² / blend_radius  regardless
-    of TCP speed, eliminating MOTN-721 at corners.
+    At each corner the sharp turn is replaced by a **quintic Bézier curve**
+    whose curvature is exactly zero at both entry and exit.  This gives full
+    C2 (position + velocity + acceleration) continuity with the adjacent
+    straight segments, eliminating the centripetal-acceleration *step* that
+    circular-arc blending produces.
 
-    Safe speed vs blend radius (conservative — J1 dominant at ~600mm reach):
-        10 mm → 185 mm/s     (default — safe for 150 mm/s with margin)
-        5  mm → 131 mm/s
-        20 mm → 262 mm/s
+    WHY NOT circular arcs?
+    ----------------------
+    A circular arc has constant curvature 1/r.  The straight segment has
+    curvature 0.  At the join, curvature steps from 0 → 1/r in one 8 ms
+    cycle.  The resulting jerk:
 
-    The path starts and ends at the *exit point* of the first vertex's arc,
-    which is used as the lead-in target in shapes_cartesian.py.
+        j = (v²/r) / cycle_s = 150²/10 / 0.008 = 281 250 mm/s³
+
+    In joint space (J2 at 600 mm reach):  ~26 800 deg/s³.
+    J2 jerk limit = 1 240 deg/s³  →  MOTN-722.
+
+    Quintic Bézier control points (6 per corner):
+        P0 = p_entry                          ⎫
+        P1 = p_entry + (bd/3) · d_in          ⎬  P0,P1,P2 collinear → κ(0) = 0
+        P2 = p_entry + (2bd/3) · d_in         ⎭
+        P3 = p_exit  − (2bd/3) · d_out        ⎫
+        P4 = p_exit  − (bd/3) · d_out         ⎬  P3,P4,P5 collinear → κ(1) = 0
+        P5 = p_exit                            ⎭
+
+    Proof of zero curvature at t=0:
+        P0″ = 20(P0 − 2P1 + P2).  With P0,P1,P2 collinear ⇒ P0−2P1+P2 = 0
+        ⇒ κ(0) = |P0″ × P0′| / |P0′|³ = 0.  Symmetric at t=1.
 
     Returns
     -------
@@ -530,8 +547,14 @@ def _build_blended_path(
     if n < 3:
         raise ValueError("Need ≥ 3 vertices")
 
+    def _bezier5(t: float, cp: List[List[float]]) -> List[float]:
+        """Evaluate a degree-5 Bézier at parameter t ∈ [0,1]."""
+        s = 1.0 - t
+        c = [s**5, 5*s**4*t, 10*s**3*t**2, 10*s**2*t**3, 5*s*t**4, t**5]
+        return [sum(c[k] * cp[k][i] for k in range(6)) for i in range(3)]
+
     # ── Pre-compute blend geometry at every corner ──────────────────────────
-    blends: List[dict] = []          # one dict per vertex
+    blends: List[dict] = []
     for k in range(n):
         v_prev = vertices[(k - 1) % n]
         v_curr = vertices[k]
@@ -542,61 +565,29 @@ def _build_blended_path(
         d_in    = [(v_curr[i] - v_prev[i]) / len_in  for i in range(3)]
         d_out   = [(v_next[i] - v_curr[i]) / len_out for i in range(3)]
 
-        # Exterior (turn) angle from dot product of the two side directions
         dot_val   = max(-1.0, min(1.0, sum(d_in[i]*d_out[i] for i in range(3))))
-        arc_angle = math.pi - math.acos(dot_val)      # exterior angle [rad]
+        arc_angle = math.pi - math.acos(dot_val)      # exterior (turn) angle [rad]
 
-        if arc_angle < 0.01:                           # nearly straight — no blend
+        if arc_angle < 0.01:                           # nearly straight — skip
             blends.append({"entry": list(v_curr), "exit": list(v_curr),
-                           "arc_angle": 0.0, "radius": 0.0,
-                           "center": list(v_curr), "axis": [0,0,1]})
+                           "arc_angle": 0.0, "bd": 0.0,
+                           "d_in": d_in, "d_out": d_out})
             continue
 
-        # Limit blend so it doesn't eat more than 45% of the shorter adjacent side
+        # Blend distance: same as circular-arc tangent length, capped at 45% of side
         bd = blend_radius * math.tan(arc_angle / 2)
         bd = min(bd, len_in * 0.45, len_out * 0.45)
-        r  = bd / math.tan(arc_angle / 2)
 
         p_entry = [v_curr[i] - bd * d_in[i]  for i in range(3)]
         p_exit  = [v_curr[i] + bd * d_out[i] for i in range(3)]
-
-        # Arc center: on the bisector of the inward normals, at r/cos(arc/2)
-        # Polygon normal (rotation axis): cross(d_in, d_out)
-        cross = [
-            d_in[1]*d_out[2] - d_in[2]*d_out[1],
-            d_in[2]*d_out[0] - d_in[0]*d_out[2],
-            d_in[0]*d_out[1] - d_in[1]*d_out[0],
-        ]
-        axis_len = math.sqrt(sum(v**2 for v in cross))
-        if axis_len < 1e-9:
-            blends.append({"entry": list(v_curr), "exit": list(v_curr),
-                           "arc_angle": 0.0, "radius": 0.0,
-                           "center": list(v_curr), "axis": [0,0,1]})
-            continue
-        axis = [v / axis_len for v in cross]           # polygon normal unit vector
-
-        # Inward normals of the two sides (axis × direction = left-hand normal for CCW)
-        n_in  = [axis[1]*d_in[2]  - axis[2]*d_in[1],
-                 axis[2]*d_in[0]  - axis[0]*d_in[2],
-                 axis[0]*d_in[1]  - axis[1]*d_in[0]]
-        n_out = [axis[1]*d_out[2] - axis[2]*d_out[1],
-                 axis[2]*d_out[0] - axis[0]*d_out[2],
-                 axis[0]*d_out[1] - axis[1]*d_out[0]]
-
-        bisector_raw = [n_in[i] + n_out[i] for i in range(3)]
-        bis_len = math.sqrt(sum(v**2 for v in bisector_raw))
-        bisector = [v / bis_len for v in bisector_raw]
-
-        center_dist = r / math.cos(arc_angle / 2)
-        center      = [v_curr[i] + center_dist * bisector[i] for i in range(3)]
 
         blends.append({
             "entry":     p_entry,
             "exit":      p_exit,
             "arc_angle": arc_angle,
-            "radius":    r,
-            "center":    center,
-            "axis":      axis,
+            "bd":        bd,
+            "d_in":      d_in,
+            "d_out":     d_out,
         })
 
     # ── Build dense path (≤1 mm step) ───────────────────────────────────────
@@ -622,25 +613,34 @@ def _build_blended_path(
         # Straight segment to this corner's blend entry
         push(b["entry"])
 
-        # Arc through this corner (skip if arc_angle ≈ 0)
-        if b["arc_angle"] > 0.01 and b["radius"] > 1e-3:
-            ctr    = b["center"]
-            r_vec  = [b["entry"][i] - ctr[i] for i in range(3)]  # center → entry
-            n_pts  = max(2, round(b["radius"] * b["arc_angle"]))   # ≈ 1 mm per step
-            ax     = b["axis"]
+        # Quintic Bézier blend through this corner (C2-continuous)
+        if b["arc_angle"] > 0.01 and b["bd"] > 1e-3:
+            bd    = b["bd"]
+            d_in  = b["d_in"]
+            d_out = b["d_out"]
+
+            # 6 control points — P0,P1,P2 collinear and P3,P4,P5 collinear
+            # guarantees zero curvature at both endpoints.
+            cp = [
+                b["entry"],
+                [b["entry"][i] + (bd / 3) * d_in[i]      for i in range(3)],
+                [b["entry"][i] + (2 * bd / 3) * d_in[i]  for i in range(3)],
+                [b["exit"][i]  - (2 * bd / 3) * d_out[i] for i in range(3)],
+                [b["exit"][i]  - (bd / 3) * d_out[i]     for i in range(3)],
+                b["exit"],
+            ]
+
+            # Sample at ~1 mm arc-length intervals.
+            # Estimate from control-polygon length (upper bound on arc length).
+            poly_len = sum(
+                math.sqrt(sum((cp[j+1][i] - cp[j][i]) ** 2 for i in range(3)))
+                for j in range(5)
+            )
+            n_pts = max(4, round(poly_len))
 
             for j in range(1, n_pts + 1):
-                theta   = b["arc_angle"] * j / n_pts
-                cos_t, sin_t = math.cos(theta), math.sin(theta)
-                dot_rv  = sum(r_vec[i] * ax[i] for i in range(3))
-                cross_rv = [
-                    ax[1]*r_vec[2] - ax[2]*r_vec[1],
-                    ax[2]*r_vec[0] - ax[0]*r_vec[2],
-                    ax[0]*r_vec[1] - ax[1]*r_vec[0],
-                ]
-                r_k = [r_vec[i]*cos_t + cross_rv[i]*sin_t + ax[i]*dot_rv*(1-cos_t)
-                       for i in range(3)]
-                push([ctr[i] + r_k[i] for i in range(3)])
+                t = j / n_pts
+                push(_bezier5(t, cp))
 
     return path_pts, cum_arcs
 
@@ -811,11 +811,11 @@ def polygon_cartesian_trajectory(
     cycle_s:              float = DEFAULT_CYCLE_S,
     start_angle_deg:      float = 0.0,
     clockwise:            bool  = False,
-    corner_blend_mm:      float = 10.0,
+    corner_blend_mm:      float = 20.0,
 ) -> List[List[float]]:
     """
     Generate a Cartesian trajectory that traces a regular polygon with
-    circular arc corner blending to eliminate MOTN-721.
+    quintic Bézier corner blending (C2-continuous) to eliminate MOTN-721/722.
 
     Architecture
     ------------
@@ -898,11 +898,11 @@ def rectangle_cartesian_trajectory(
     max_tcp_angular_degs: float = 45.0,
     cycle_s:              float = DEFAULT_CYCLE_S,
     clockwise:            bool  = False,
-    corner_blend_mm:      float = 10.0,
+    corner_blend_mm:      float = 20.0,
 ) -> List[List[float]]:
     """
-    Generate a Cartesian trajectory that traces a rectangle with circular arc
-    corner blending to eliminate MOTN-721 at 90° corners.
+    Generate a Cartesian trajectory that traces a rectangle with quintic Bézier
+    corner blending (C2-continuous) to eliminate MOTN-721/722 at 90° corners.
 
     Architecture
     ------------

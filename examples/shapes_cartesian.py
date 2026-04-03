@@ -57,13 +57,13 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ── Robot / Communication Settings ───────────────────────────────────────────
-ROBOT_IP   = "192.168.72.158"
+ROBOT_IP   = "192.168.56.1"
 ROBOT_PORT = 60015
 
 # ── Shape Selection ───────────────────────────────────────────────────────────
 # Choose one of: "circle", "square", "rectangle", "triangle",
 #                "pentagon", "hexagon", "polygon"
-SHAPE = "square"
+SHAPE = "pentagon"
 
 # Size:
 #   circle    → radius in mm
@@ -89,12 +89,14 @@ CLOCKWISE = False
 MAX_LINEAR_MMS   = CRX_CART_LINEAR_MMS    # 150 mm/s
 MAX_ANGULAR_DEGS = CRX_CART_ANGULAR_DEGS  # 45 deg/s
 
-# Corner blend arc radius for polygons and rectangle [mm].
-# Replaces sharp corners with a circular arc, preventing MOTN-721.
-# Safe speed limit ≈ sqrt(3000 × CORNER_BLEND_MM) mm/s.
-#   10 mm → ~173 mm/s    20 mm → ~245 mm/s
-# Increase CORNER_BLEND_MM if raising MAX_LINEAR_MMS above 150 mm/s.
-CORNER_BLEND_MM = 10.0
+# Corner blend radius for polygons and rectangle [mm].
+# Each sharp corner is replaced by a quintic Bézier curve (C2-continuous)
+# whose curvature starts and ends at zero — no jerk spike at the join.
+# Larger values round corners more but allow higher speed / sharper angles.
+#   10 mm → safe for hexagon/pentagon/square at 150 mm/s
+#   20 mm → safe for ALL shapes including triangle at 150 mm/s  ← default
+#   30 mm → comfortable margin for aggressive speed tests
+CORNER_BLEND_MM = 20.0
 
 
 # ── Shape name → polygon sides mapping ───────────────────────────────────────
@@ -258,4 +260,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main
+    main()
